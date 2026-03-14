@@ -1,0 +1,1915 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <title>Ponto Inteligente</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jwt-decode@3.1.2/build/jwt-decode.min.js"></script>
+    <script>
+      // (CORREÇÃO V43) Verifica se o Tailwind carregou para evitar erro no console
+      if (typeof tailwind !== 'undefined') {
+        tailwind.config = { darkMode: "class" };
+      } else {
+        console.warn("Tailwind CSS não carregou. Verifique sua conexão com a internet.");
+      }
+    </script>
+    <style>
+      body {
+        overscroll-behavior-y: contain;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+      /* Estilos Light (Default) */
+      .app-container {
+        background-color: #f4f7fa;
+      }
+      .card {
+        background-color: white;
+        border-radius: 1.25rem;
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05),
+          0 10px 10px -5px rgba(0, 0, 0, 0.04);
+      }
+      .nav-container {
+        background-color: white;
+        border-top: 1px solid #e5e7eb;
+        box-shadow: 0 -5px 20px rgba(0, 0, 0, 0.05);
+      }
+      .text-default {
+        color: #1f2937;
+      } /* text-gray-800 */
+      .text-muted {
+        color: #6b7280;
+      } /* text-gray-500 */
+      .form-input-light {
+        margin-top: 4px;
+        display: block;
+        width: 100%;
+        background-color: #f3f4f6;
+        border: 1px solid #e5e7eb;
+        border-radius: 0.5rem;
+        padding: 0.75rem;
+        color: #1f2937;
+      }
+      .form-input-light:focus {
+        outline: 2px solid transparent;
+        outline-offset: 2px;
+        border-color: #3b82f6;
+        box-shadow: 0 0 0 2px #3b82f6;
+      }
+      .form-input-light:disabled {
+        background-color: #e5e7eb;
+        opacity: 0.7;
+      }
+
+      /* Estilos Dark */
+      .dark .app-container {
+        background-color: #111827;
+      }
+      .dark .card {
+        background-color: #1f2937;
+      }
+      .dark .nav-container {
+        background-color: #1f2937;
+        border-top: 1px solid #374151;
+      }
+      .dark .text-default {
+        color: #f9fafb;
+      }
+      .dark .text-muted {
+        color: #9ca3af;
+      }
+      .dark .form-input-light {
+        background-color: #374151;
+        border: 1px solid #4b5563;
+        color: #f9fafb;
+      }
+      .dark .form-input-light:focus {
+        border-color: #3b82f6;
+      }
+      .dark .form-input-light:disabled {
+        background-color: #4b5563;
+        opacity: 0.5;
+      }
+
+      /* Botão de Ponto */
+      .point-button-container {
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: 1rem;
+        border-radius: 0.75rem;
+        transition: all 0.2s;
+      }
+      .point-button-main {
+        display: flex;
+        align-items: center;
+        width: 100%;
+      }
+      .point-button-container.disabled {
+        background-color: #d1d5db;
+        border: 1px solid #9ca3af;
+        color: #6b7280;
+        opacity: 0.7;
+        box-shadow: none;
+      }
+      .point-button-container.disabled .point-button-action {
+        pointer-events: none;
+      }
+      .dark .point-button-container.disabled {
+        background-color: #374151;
+        border: 1px solid #4b5563;
+        color: #9ca3af;
+      }
+      .point-button-action {
+        flex-grow: 1;
+        cursor: pointer;
+      }
+      .edit-icon {
+        cursor: pointer;
+        transition: color 0.2s;
+      }
+      .edit-icon:hover {
+        color: #3b82f6;
+      } /* text-blue-500 */
+
+      /* Toggle Switch (Genérico) */
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 3.5rem;
+        height: 1.75rem;
+      }
+      .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: #ccc;
+        transition: 0.4s;
+        border-radius: 1.75rem;
+      }
+      .slider:before {
+        position: absolute;
+        content: "";
+        height: 1.25rem;
+        width: 1.25rem;
+        left: 0.25rem;
+        bottom: 0.25rem;
+        background-color: white;
+        transition: 0.4s;
+        border-radius: 50%;
+      }
+      input:checked + .slider {
+        background-color: #3b82f6;
+      } /* blue-500 */
+      /* Cor específica para o toggle de Feriado */
+      input#toggle-holiday:checked + .slider {
+         background-color: #fbbf24; /* amber-400 */
+      }
+
+
+      /* Animação de Glow Dourado */
+      @keyframes gold-pulse-text {
+        0%,
+        100% {
+          text-shadow: 0 0 5px #fcd34d, 0 0 10px #fcd34d;
+        } /* amber-300 */
+        50% {
+          text-shadow: 0 0 10px #fbbf24, 0 0 20px #fbbf24;
+        } /* amber-400 */
+      }
+      @keyframes gold-pulse-shadow {
+        0%,
+        100% {
+          box-shadow: 0 0 8px #fbbf24, 0 0 12px #fbbf24, inset 0 0 4px #fbbf24;
+        } /* amber-400 */
+        50% {
+          box-shadow: 0 0 12px #fcd34d, 0 0 20px #fcd34d, inset 0 0 8px #fcd34d;
+        } /* amber-300 */
+      }
+      .gold-glow-text {
+        color: #fbbf24 !important; /* text-amber-400 */
+        animation: gold-pulse-text 2s infinite ease-in-out;
+      }
+      .gold-glow-element {
+        animation: gold-pulse-shadow 2s infinite ease-in-out;
+        border: 1px solid #f59e0b; /* amber-500 */
+      }
+      /* Estilo para o Relógio */
+      #realtime-clock {
+        text-shadow: 0 0 5px rgba(0, 0, 0, 0.1);
+      }
+      .dark #realtime-clock {
+        text-shadow: 0 0 5px rgba(255, 255, 255, 0.1);
+      }
+
+      /* Rotação do Chevron */
+      #farm-bar-toggle.expanded svg {
+        transform: rotate(180deg);
+      }
+
+      /* Estilos da Barra de Navegação */
+      .nav-link {
+        transition: all 0.2s;
+        transform: scale(0.95);
+      }
+      .nav-link.active {
+        transform: scale(1.1) translateY(-4px);
+      }
+
+      /* (NOVO) Teclado Virtual */
+      .virtual-keyboard {
+        display: none; /* Oculto por padrão */
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.5rem;
+        padding: 0.5rem;
+        background-color: #d1d5db; /* gray-300 */
+        border-radius: 0 0 0.5rem 0.5rem;
+        border-top: 1px solid #9ca3af; /* gray-400 */
+      }
+      .dark .virtual-keyboard {
+         background-color: #374151; /* gray-700 */
+         border-top: 1px solid #4b5563; /* gray-600 */
+      }
+      .virtual-keyboard-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 3.5rem;
+        font-size: 1.5rem;
+        font-weight: 600;
+        border-radius: 0.5rem;
+        background-color: white;
+        color: #1f2937;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        cursor: pointer;
+        user-select: none;
+      }
+      .dark .virtual-keyboard-btn {
+        background-color: #4b5563; /* gray-600 */
+        color: #f9fafb;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+      }
+      .virtual-keyboard-btn:active {
+        background-color: #e5e7eb; /* gray-200 */
+      }
+      .dark .virtual-keyboard-btn:active {
+        background-color: #6b7280; /* gray-500 */
+      }
+      .virtual-keyboard-btn.action {
+         background-color: #9ca3af; /* gray-400 */
+      }
+      .dark .virtual-keyboard-btn.action {
+         background-color: #374151; /* gray-700 */
+      }
+      
+      /* (NOVO) Regra para exibir teclado apenas em mobile */
+      @media (max-width: 768px) {
+        /* Esconde o seletor de tempo nativo em mobile */
+        #modal-input-time::-webkit-calendar-picker-indicator {
+          display: none;
+        }
+        /* Mostra o teclado virtual */
+        .virtual-keyboard {
+          display: grid;
+        }
+        /* Ajusta o input para parecer um display */
+        #modal-input-time {
+          text-align: center;
+          font-size: 1.875rem; /* text-3xl */
+          font-weight: 700;
+          letter-spacing: 0.1em;
+          border-bottom-left-radius: 0;
+          border-bottom-right-radius: 0;
+        }
+      }
+    </style>
+  </head>
+  <body class="bg-gray-200 dark:bg-black">
+    <div
+      id="app-container"
+      class="app-container relative max-w-md mx-auto min-h-screen text-default shadow-2xl flex flex-col"
+    >
+      <section
+        id="page-login"
+        class="flex-grow flex flex-col justify-center items-center p-8 hidden"
+      >
+        <div class="card w-full p-8 space-y-6">
+          <h2 class="text-2xl font-bold text-center text-default">
+            Login Ponto Inteligente
+          </h2>
+          <form id="loginForm" class="space-y-4">
+            <div>
+              <label
+                for="login-email"
+                class="block text-sm font-medium text-muted"
+                >Login</label
+              >
+              <input
+                type="text"
+                id="login-email"
+                required
+                class="form-input-light w-full"
+                placeholder="seu.login"
+              />
+            </div>
+            <div>
+              <label
+                for="login-password"
+                class="block text-sm font-medium text-muted"
+                >Senha</label
+              >
+              <input
+                type="password"
+                id="login-password"
+                class="form-input-light w-full"
+                placeholder="********"
+              />
+              <p class="text-xs text-muted mt-1">
+                Deixe em branco no primeiro login.
+              </p>
+            </div>
+            <button
+              type="submit"
+              class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg shadow-lg"
+            >
+              Entrar
+            </button>
+            <div
+              id="loginError"
+              class="text-center text-red-500 text-sm h-4"
+            ></div>
+          </form>
+        </div>
+      </section>
+
+      <div id="main-content" class="flex flex-col flex-grow hidden">
+        <header
+          id="app-header"
+          class="p-5 flex justify-between items-center sticky top-0 bg-opacity-90 backdrop-blur-sm z-10 bg-white/80 dark:bg-gray-900/80 shadow-lg"
+        >
+          <div class="flex items-center space-x-3">
+            <div
+              class="w-10 h-10 bg-purple-600 rounded-full flex items-center justify-center text-white font-bold text-lg"
+              id="user-initial"
+            >
+              U
+            </div>
+            <div>
+              <h1 class="font-bold text-lg text-default" id="user-greeting">
+                Bom dia, Usuário
+              </h1>
+              <p id="header-date" class="text-sm text-muted">carregando...</p>
+            </div>
+          </div>
+          <div class="flex items-center space-x-2">
+            <button
+              id="btn-share"
+              title="Compartilhar"
+              class="text-muted hover:text-default p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-6 w-6"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M8.684 13.342C8.886 12.938 9 12.482 9 12s-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.367 2.684 3 3 0 00-5.367-2.684z"
+                />
+              </svg>
+            </button>
+            <button
+              id="btn-darkmode"
+              title="Mudar Tema"
+              class="text-muted hover:text-default p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700"
+            >
+              <svg
+                id="icon-moon"
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-6 w-6"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"
+                />
+              </svg>
+              <svg
+                id="icon-sun"
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-6 w-6 hidden"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"
+                />
+              </svg>
+            </button>
+          </div>
+        </header>
+
+        <main id="app-content" class="flex-grow p-5 overflow-y-auto pb-24">
+          <section id="page-dashboard" class="space-y-5 hidden">
+            <div id="farm-bar" class="card w-full p-4 mb-5">
+              <div
+                id="realtime-clock"
+                class="text-center text-4xl font-bold text-default mb-2"
+              >
+                --:--:--
+              </div>
+              
+              <div class="flex justify-between items-start">
+                <div class="flex-1">
+                  <div class="flex items-center space-x-2">
+                    <h3 class="text-lg font-semibold text-default">
+                      Resumo do Dia
+                    </h3>
+                    <button
+                      id="btn-info-calculo"
+                      class="text-muted hover:text-blue-500"
+                      title="Info de Cálculos"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        class="h-5 w-5"
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                      >
+                        <path
+                          fill-rule="evenodd"
+                          d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                          clip-rule="evenodd"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                   <p
+                    id="atraso-info"
+                    class="text-xs text-red-500 font-medium hidden mt-1 h-4" 
+                  >
+                    Atraso: 0 min
+                  </p>
+                </div>
+                <div class="flex items-center space-x-2">
+                  <div class="text-right">
+                    <span
+                      id="farm-total-valor"
+                      class="text-xl font-bold text-green-500"
+                      >R$ --,--</span
+                    >
+                    <span
+                      id="farm-total-horas"
+                      class="block text-sm font-medium text-blue-600 dark:text-blue-400"
+                      >--:--</span
+                    >
+                  </div>
+                  <button
+                    id="farm-bar-toggle"
+                    class="p-2 text-muted hover:text-default rounded-full"
+                  >
+                    <svg
+                      class="w-5 h-5 transition-transform"
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                    >
+                      <path
+                        fill-rule="evenodd"
+                        d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                        clip-rule="evenodd"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              
+
+              <div
+                id="farm-bar-details"
+                class="hidden mt-4 pt-4 border-t border-gray-200 dark:border-gray-700"
+              >
+                <div
+                  id="holiday-card"
+                  class="transition-all duration-300 mb-4" 
+                >
+                <div class="flex justify-between items-center">
+                    <label
+                      id="holiday-label"
+                      for="toggle-holiday"
+                      class="font-semibold text-muted transition-all duration-300"
+                      >Feriado?</label
+                    >
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="toggle-holiday" />
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+                </div>
+
+                <div
+                  id="farm-card-content"
+                  class="space-y-4 transition-all duration-300 relative"
+                >
+                  <div>
+                    <label class="text-sm font-semibold text-default">Progresso Total do Dia</label>
+                    <div class="relative w-full bg-gray-300 dark:bg-gray-900 rounded-full h-4 mt-1">
+                      <div
+                        id="bar-farm-total"
+                        class="bg-green-500 h-4 rounded-full"
+                        style="width: 0%"
+                      ></div>
+                    </div>
+                    <div class="flex justify-between text-xs text-muted mt-1">
+                      <span id="label-farm-total">R$ 0,00</span>
+                      <span id="target-farm-total">Meta Total: R$ 0,00</span>
+                    </div>
+                  </div>
+                  
+                  <div class="pl-4 border-l-2 border-gray-300 dark:border-gray-700 space-y-3 pt-2 pb-1">
+                    <div>
+                      <label class="text-xs font-semibold text-muted">Jornada Normal</label>
+                      <div class="relative w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
+                        <div
+                          id="bar-farm-jornada"
+                          class="bg-green-500 h-2.5 rounded-full"
+                          style="width: 0%"
+                        ></div>
+                      </div>
+                      <div class="flex justify-between text-xs text-muted mt-1">
+                        <span id="label-farm-jornada">R$ 0,00</span>
+                        <span id="target-farm-jornada">Meta: R$ 0,00</span>
+                      </div>
+                    </div>
+                    
+                    <div id="farm-he-container" class="hidden">
+                       <label class="text-xs font-semibold text-muted">Horas Extras</label>
+                      <div class="relative w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
+                        <div
+                          id="bar-farm-he"
+                          class="bg-amber-400 h-2.5 rounded-full"
+                          style="width: 0%"
+                        ></div>
+                      </div>
+                      <div class="flex justify-between text-xs text-muted mt-1">
+                        <span id="label-farm-he">R$ 0,00</span>
+                        <span id="target-farm-he">Meta HE: R$ 0,00</span>
+                      </div>
+                    </div>
+                    
+                    <div id="farm-noturno-container" class="hidden">
+                      <label class="text-xs font-semibold text-muted">Adicional Noturno</label>
+                      <div class="relative w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
+                        <div
+                          id="bar-farm-noturno"
+                          class="bg-indigo-500 h-2.5 rounded-full"
+                          style="width: 100%"
+                        ></div>
+                      </div>
+                      <div class="flex justify-end text-xs text-muted mt-1">
+                        <span id="label-farm-noturno">R$ 0,00</span>
+                      </div>
+                    </div>
+                    
+                    <div id="farm-feriado-container" class="hidden">
+                      <label class="text-xs font-semibold text-muted">Adicional Feriado/Domingo</label>
+                      <div class="relative w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
+                        <div
+                          id="bar-farm-feriado"
+                          class="bg-pink-500 h-2.5 rounded-full"
+                          style="width: 100%"
+                        ></div>
+                      </div>
+                      <div class="flex justify-end text-xs text-muted mt-1">
+                        <span id="label-farm-feriado">R$ 0,00</span>
+                      </div>
+                    </div>
+                    
+                  </div>
+                  <div id="display-estourado" class="hidden pt-2 text-center">
+                    <span class="font-semibold text-red-500">Tempo Estourado:</span>
+                    <span id="display-estourado-tempo" class="font-bold text-red-500">--:--</span>
+                    <span id="display-estourado-valor" class="font-bold text-red-500">(R$ --,--)</span>
+                  </div>
+
+                  <div>
+                    <hr class="border-gray-200 dark:border-gray-700 my-4" />
+                    <div class="flex justify-between items-center mb-1">
+                      <span
+                        id="farm-mes-label"
+                        class="text-sm font-medium text-muted transition-all duration-300"
+                        >Horas extras totais</span
+                      >
+                      <div class="text-right">
+                         <span
+                          id="display-horas-extras-valor"
+                          class="text-sm font-bold text-green-500"
+                          >R$ --,--</span
+                        >
+                        <span
+                          id="display-horas-extras-mes"
+                          class="block text-xs font-bold text-blue-600 dark:text-blue-400"
+                          >--:--</span
+                        >
+                      </div>
+                    </div>
+                    </div>
+                </div>
+                </div>
+            </div>
+
+            <div id="point-buttons-wrapper">
+              <div class="card p-5">
+                <h2 class="text-center font-semibold text-muted mb-4">
+                  Registrar Ponto
+                </h2>
+                <div class="space-y-3">
+                  <div
+                    id="btn-container-entrada"
+                    class="point-button-container w-full bg-green-500 text-white shadow-lg shadow-green-500/30"
+                  >
+                    <div class="point-button-main">
+                      <div
+                        id="btn-entrada"
+                        class="point-button-action flex flex-col items-start"
+                      >
+                        <span class="font-bold">Entrada</span>
+                        <span id="atraso-entrada" class="text-xs font-medium text-red-500 hidden"></span>
+                      </div>
+                      <div class="flex items-center space-x-2">
+                        <span class="font-mono font-bold text-lg">--:--</span>
+                        <svg
+                          id="btn-edit-entrada"
+                          xmlns="http://www.w3.org/2000/svg"
+                          class="h-5 w-5 hidden edit-icon"
+                          viewBox="0 0 20 20"
+                          fill="currentColor"
+                        >
+                          <path
+                            d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z"
+                          />
+                          <path
+                            fill-rule="evenodd"
+                            d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"
+                            clip-rule="evenodd"
+                          />
+                        </svg>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div
+                    id="btn-container-almoco"
+                    class="point-button-container w-full bg-yellow-500 text-white shadow-lg shadow-yellow-500/30 transition-all"
+                  >
+                    <div class="point-button-main">
+                      <div
+                        id="btn-almoco"
+                        class="point-button-action flex flex-col items-start space-x-0"
+                      >
+                        <div class="flex items-center space-x-3">
+                          <span class="font-bold">Saída p/ Almoço</span>
+                          <span
+                            id="suggested-almoco_saida"
+                            class="text-xs opacity-75"
+                            >(Sug: --:--)</span
+                          >
+                        </div>
+                        <div
+                          id="almoco-retorno-labels"
+                          class="flex items-center space-x-3 mt-2 hidden"
+                        >
+                          <span class="font-bold">Volta do Almoço</span>
+                          <span
+                            id="suggested-almoco_retorno"
+                            class="text-xs opacity-75"
+                            >(Sug: --:--)</span
+                          >
+                        </div>
+                        <span id="total-almoco" class="text-xs font-medium text-white/80 hidden mt-1"></span>
+                        <span id="excesso-almoco" class="text-xs font-medium text-red-500 hidden mt-1"></span>
+                      </div>
+
+                      <div class="flex flex-col items-end space-y-1">
+                        <div class="flex items-center space-x-2">
+                          <span
+                            id="time-almoco_saida"
+                            class="font-mono font-bold text-lg"
+                            >--:--</span
+                          >
+                          <svg
+                            id="btn-edit-almoco_saida"
+                            class="h-5 w-5 hidden edit-icon"
+                            fill="currentColor"
+                            viewBox="0 0 20 20"
+                          >
+                            <path
+                              d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z"
+                            />
+                            <path
+                              fill-rule="evenodd"
+                              d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"
+                              clip-rule="evenodd"
+                            />
+                          </svg>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                          <span
+                            id="time-almoco_retorno"
+                            class="font-mono font-bold text-lg hidden"
+                            >--:--</span
+                          >
+                          <svg
+                            id="btn-edit-almoco_retorno"
+                            class="h-5 w-5 hidden edit-icon"
+                            fill="currentColor"
+                            viewBox="0 0 20 20"
+                          >
+                            <path
+                              d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z"
+                            />
+                            <path
+                              fill-rule="evenodd"
+                              d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"
+                              clip-rule="evenodd"
+                            />
+                          </svg>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="mt-2">
+                      <span
+                        id="countdown-almoco"
+                        class="text-sm font-medium text-default dark:text-gray-100 hidden"
+                      ></span>
+                      <span
+                        id="horario-retorno-almoco"
+                        class="text-xs font-medium text-default dark:text-gray-100 hidden"
+                      ></span>
+                    </div>
+                  </div>
+                  
+                  <div
+                    id="btn-container-pausa"
+                    class="point-button-container w-full bg-gray-800 text-white shadow-lg shadow-gray-800/30 transition-all disabled"
+                  >
+                    <div class="point-button-main">
+                      <div
+                        id="btn-pausa"
+                        class="point-button-action flex flex-col items-start space-x-0"
+                      >
+                        <div id="pausa-start-labels" class="flex items-center space-x-3">
+                          <span class="font-bold">Pausa (15min)</span>
+                        </div>
+                        <div
+                          id="pausa-retorno-labels"
+                          class="flex items-center space-x-3 mt-2 hidden"
+                        >
+                          <span class="font-bold">Retornar Pausa</span>
+                        </div>
+                        <span id="total-pausa" class="text-xs font-medium text-white/80 hidden mt-1"></span>
+                        <span id="excesso-pausa" class="text-xs font-medium text-red-500 hidden mt-1"></span>
+                        </div>
+
+                      <div class="flex flex-col items-end space-y-1">
+                        <div class="flex items-center space-x-2">
+                          <span
+                            id="time-pausa_start"
+                            class="font-mono font-bold text-lg"
+                            >--:--</span
+                          >
+                          <svg
+                            id="btn-edit-pausa_start"
+                            class="h-5 w-5 hidden edit-icon"
+                            fill="currentColor"
+                            viewBox="0 0 20 20"
+                          >
+                            <path
+                              d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z"
+                            />
+                            <path
+                              fill-rule="evenodd"
+                              d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"
+                              clip-rule="evenodd"
+                            />
+                          </svg>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                          <span
+                            id="time-pausa_end"
+                            class="font-mono font-bold text-lg hidden"
+                            >--:--</span
+                          >
+                          <svg
+                            id="btn-edit-pausa_end"
+                            class="h-5 w-5 hidden edit-icon"
+                            fill="currentColor"
+                            viewBox="0 0 20 20"
+                          >
+                            <path
+                              d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z"
+                            />
+                            <path
+                              fill-rule="evenodd"
+                              d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"
+                              clip-rule="evenodd"
+                            />
+                          </svg>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="mt-2">
+                      <span
+                        id="countdown-pausa"
+                        class="text-sm font-medium text-default dark:text-gray-100 hidden"
+                      ></span>
+                      <span
+                        id="horario-retorno-pausa"
+                        class="text-xs font-medium text-default dark:text-gray-100 hidden"
+                      ></span>
+                    </div>
+                  </div>
+                  <div
+                    id="btn-container-saida"
+                    class="point-button-container w-full bg-red-500 text-white shadow-lg shadow-red-500/30 disabled"
+                  >
+                    <div class="point-button-main">
+                      <div
+                        id="btn-saida"
+                        class="point-button-action flex items-center space-x-3"
+                      >
+                        <span class="font-bold">Saída</span>
+                        <span id="suggested-saida" class="text-xs opacity-75"
+                          >(Sug: --:--)</span
+                        >
+                      </div>
+                      <div class="flex items-center space-x-2">
+                        <span class="font-mono font-bold text-lg">--:--</span>
+                        <svg
+                          id="btn-edit-saida"
+                          xmlns="http://www.w3.org/2000/svg"
+                          class="h-5 w-5 hidden edit-icon"
+                          viewBox="0 0 20 20"
+                          fill="currentColor"
+                        >
+                          <path
+                            d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z"
+                          />
+                          <path
+                            fill-rule="evenodd"
+                            d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"
+                            clip-rule="evenodd"
+                          />
+                        </svg>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <button id="btn-limpar-tudo" class="hidden mt-4 w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg">
+                  Limpar Todos os Registros do Dia
+                </button>
+              </div>
+            </div>
+
+            <div id="saida-sugerida-card" class="card p-6 text-center">
+              <p class="font-semibold text-muted">Saída Sugerida</p>
+              <p
+                id="display-saida-sugerida"
+                class="text-5xl font-bold text-default my-1"
+              >
+                --:--
+              </p>
+              <p
+                id="display-faltam"
+                class="text-md text-muted font-medium mb-3"
+              >
+                Aguardando entrada...
+              </p>
+
+              <div
+                id="display-saida-sugerida-he"
+                class="hidden border-t border-gray-200 dark:border-gray-700 pt-3"
+              >
+                <p class="text-sm font-semibold text-amber-500">
+                  Saída (c/ 2h HE)
+                </p>
+                <p
+                  id="display-saida-sugerida-he-time"
+                  class="text-3xl font-bold text-amber-400"
+                >
+                  --:--
+                </p>
+              </div>
+
+              <button
+                id="btn-view-report"
+                class="hidden mt-4 w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg"
+              >
+                Ver Relatório
+              </button>
+
+              <button id="btn-alterar-horarios" class="hidden mt-2 w-full bg-yellow-500 hover:bg-yellow-600 text-black font-bold py-2 px-4 rounded-lg">
+                Alterar Horários
+              </button>
+            </div>
+          </section>
+
+          <section id="page-relatorios" class="hidden">
+            <div class="card p-5">
+              <h2 class="text-xl font-bold text-default mb-4">
+                Relatórios (Em breve)
+              </h2>
+              <p class="text-muted">
+                Aqui você poderá ver seu histórico semanal, mensal e exportar
+                relatórios detalhados.
+              </p>
+            </div>
+          </section>
+
+          <section id="page-alarmes" class="hidden">
+            <div class="card p-5">
+              <h2 class="text-xl font-bold text-default mb-4">
+                Alarmes (Em breve)
+              </h2>
+              <p class="text-muted">
+                Configure alertas para não esquecer de bater o ponto, como
+                notificações 5 minutos antes da saída sugerida.
+              </f>
+            </div>
+          </section>
+
+          <section id="page-settings" class="hidden">
+            <form id="settingsForm" class="space-y-5 pb-6">
+              <div class="card p-5">
+                <h3
+                  class="text-lg font-semibold text-default border-b border-gray-200 dark:border-gray-700 pb-2 mb-4"
+                >
+                  Jornada e Horários
+                </h3>
+                <div class="space-y-4">
+                  <div>
+                    <label class="block text-sm font-medium text-muted mb-1"
+                      >Jornada Diária</label
+                    >
+                    <div class="grid grid-cols-2 gap-2">
+                      <input
+                        type="number"
+                        id="jornada_horas"
+                        min="0"
+                        max="23"
+                        class="form-input-light"
+                        placeholder="7"
+                      />
+                      <input
+                        type="number"
+                        id="jornada_minutos"
+                        min="0"
+                        max="59"
+                        class="form-input-light"
+                        placeholder="20"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-muted mb-1"
+                      >Tempo de Almoço</label
+                    >
+                    <div class="grid grid-cols-2 gap-2">
+                      <input
+                        type="number"
+                        id="almoco_horas"
+                        min="0"
+                        max="23"
+                        class="form-input-light"
+                        placeholder="1"
+                      />
+                      <input
+                        type="number"
+                        id="almoco_minutos"
+                        min="0"
+                        max="59"
+                        class="form-input-light"
+                        placeholder="0"
+                      />
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-2 gap-4 pt-2">
+                    <div>
+                      <label
+                        for="entrada_padrao"
+                        class="block text-sm font-medium text-muted"
+                        >Entrada Padrão</label
+                      >
+                      <input
+                        type="time"
+                        id="entrada_padrao"
+                        class="form-input-light"
+                      />
+                    </div>
+                    <div>
+                      <label
+                        for="saida_almoco_padrao"
+                        class="block text-sm font-medium text-muted"
+                        >Saída Almoço Padrão</label
+                      >
+                      <input
+                        type="time"
+                        id="saida_almoco_padrao"
+                        class="form-input-light"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="card p-5">
+                <h3
+                  class="text-lg font-semibold text-default border-b border-gray-200 dark:border-gray-700 pb-2 mb-4"
+                >
+                  Valores e Multiplicadores
+                </h3>
+                <div class="flex items-center justify-between mb-4">
+                  <label for="toggle-clt" class="font-semibold text-muted"
+                    >Usar Padrão CLT</label
+                  >
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="toggle-clt" checked />
+                    <span class="slider"></span>
+                  </label>
+                </div>
+                
+                <div id="valores-wrapper" class="grid grid-cols-2 gap-4">
+                  <div>
+                    <label
+                      for="salary_monthly"
+                      class="block text-sm font-medium text-muted"
+                      >Salário Base (R$)</label
+                    ><input
+                      type="number"
+                      step="0.01"
+                      id="salary_monthly"
+                      class="form-input-light"
+                      placeholder="1518.00"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      for="dias_trabalho_por_semana"
+                      class="block text-sm font-medium text-muted"
+                      >Dias/Semana</label
+                    ><input
+                      type="number"
+                      id="dias_trabalho_por_semana"
+                      class="form-input-light"
+                      placeholder="6"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      for="multiplicador_hora_extra"
+                      class="block text-sm font-medium text-muted"
+                      >Multiplic. HE</label
+                    ><input
+                      type="number"
+                      step="0.1"
+                      id="multiplicador_hora_extra"
+                      class="form-input-light"
+                      placeholder="1.5"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      for="multiplicador_feriado_domingo"
+                      class="block text-sm font-medium text-muted"
+                      >Multiplic. Feriado/Dom</label
+                    ><input
+                      type="number"
+                      step="0.1"
+                      id="multiplicador_feriado_domingo"
+                      class="form-input-light"
+                      placeholder="2.0"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      for="adicional_noturno_percent"
+                      class="block text-sm font-medium text-muted"
+                      >Adic. Noturno (%)</label
+                    ><input
+                      type="number"
+                      step="0.1"
+                      id="adicional_noturno_percent"
+                      class="form-input-light"
+                      placeholder="20"
+                    />
+                  </div>
+                  <div class="col-span-2">
+                    <label
+                      for="fgts_percent"
+                      class="block text-sm font-medium text-muted"
+                      >FGTS (%)</label
+                    ><input
+                      type="number"
+                      step="0.1"
+                      id="fgts_percent"
+                      class="form-input-light"
+                      placeholder="8.0"
+                    />
+                  </div>
+                </div>
+              </div>
+              <div class="card p-5">
+                <h3
+                  class="text-lg font-semibold text-default border-b border-gray-200 dark:border-gray-700 pb-2 mb-4"
+                >
+                  Regras de Negócio
+                </h3>
+                <div class="space-y-4">
+                  <div>
+                    <label
+                      for="tolerancia_entrada_minutes"
+                      class="block text-sm font-medium text-muted"
+                      >Tolerância Entrada (min)</label
+                    ><input
+                      type="number"
+                      id="tolerancia_entrada_minutes"
+                      class="form-input-light"
+                      placeholder="10"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      for="max_he_minutes"
+                      class="block text-sm font-medium text-muted"
+                      >Limite HE (min/dia)</label
+                    ><input
+                      type="number"
+                      id="max_he_minutes"
+                      class="form-input-light"
+                      placeholder="120"
+                    />
+                  </div>
+                  <div class="flex items-center justify-between">
+                    <span class="text-sm font-medium text-muted"
+                      >Habilitar Pausa 15min?</span
+                    ><input
+                      type="checkbox"
+                      id="has_15min_pause"
+                      class="h-5 w-5 rounded text-blue-600 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div class="flex items-center justify-between">
+                    <span class="text-sm font-medium text-muted"
+                      >Almoço é pago (conta como trabalhado)?</span
+                    ><input
+                      type="checkbox"
+                      id="is_almoco_pago"
+                      class="h-5 w-5 rounded text-blue-600 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div class="flex items-center justify-between">
+                    <span class="text-sm font-medium text-muted"
+                      >Desativar mult. de Domingo?</span
+                    ><input
+                      type="checkbox"
+                      id="disable_sunday_auto_multiplier"
+                      class="h-5 w-5 rounded text-blue-600 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      for="pause_policy"
+                      class="block text-sm font-medium text-muted"
+                      >Política de Pausa</label
+                    ><select id="pause_policy" class="form-input-light">
+                      <option value="per_event">
+                        Por Evento (15min/pausa)
+                      </option>
+                      <option value="per_day">Por Dia (15min/dia)</option>
+                    </select>
+                  </div>
+                  <div class="flex items-center justify-between">
+                    <span class="text-sm font-medium text-muted"
+                      >Alerta de Voz</span
+                    ><input
+                      type="checkbox"
+                      id="alert_voice_on"
+                      class="h-5 w-5 rounded text-blue-600 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+              <div class="card p-5">
+                <h3
+                  class="text-lg font-semibold text-default border-b border-gray-200 dark:border-gray-700 pb-2 mb-4"
+                >
+                  Localização
+                </h3>
+                <div>
+                  <label
+                    for="timezone"
+                    class="block text-sm font-medium text-muted"
+                    >Fuso Horário (IANA)</label
+                  >
+                  <select id="timezone" class="form-input-light">
+                    <option value="America/Sao_Paulo">
+                      São Paulo (BRT, -03:00)
+                    </option>
+                    <option value="America/Cuiaba">Cuiabá (AMT, -04:00)</option>
+                    <option value="America/Manaus">Manaus (AMT, -04:00)</option>
+                    <option value="America/Rio_Branco">
+                      Rio Branco (ACT, -05:00)
+                    </option>
+                    <option value="America/Noronha">
+                      Noronha (FNT, -02:00)
+                    </option>
+                    <option value="America/New_York">
+                      Nova Iorque (EDT, -04:00)
+                    </option>
+                    <option value="Europe/Lisbon">Lisboa (WEST, +01:00)</option>
+                    <option value="Europe/London">Londres (BST, +01:00)</option>
+                    <option value="UTC">UTC (00:00)</option>
+                  </select>
+                </div>
+              </div>
+              <button
+                type="submit"
+                class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg shadow-lg shadow-green-500/30 transition-all"
+              >
+                Salvar Configurações
+              </button>
+              <div
+                id="saveStatus"
+                class="text-center text-green-500 dark:text-green-400 mt-2 h-4"
+              ></div>
+            </form>
+
+            <div class="mt-8 space-y-4 pb-6">
+              <button
+                id="btn-admin-panel"
+                class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg hidden"
+              >
+                Painel Administrador
+              </button>
+              <button
+                id="btn-change-password"
+                class="w-full bg-yellow-500 hover:bg-yellow-600 text-black font-bold py-3 px-4 rounded-lg"
+              >
+                Alterar Senha
+              </button>
+              <button
+                id="btn-logout"
+                class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-lg"
+              >
+                Sair (Logout)
+              </button>
+            </div>
+          </section>
+
+          <section id="page-admin" class="space-y-5 hidden">
+            <div class="flex justify-between items-center">
+              <h2 class="text-xl font-bold text-default">Painel Admin</h2>
+              <button
+                id="btn-back-to-settings"
+                class="text-sm text-blue-500 hover:underline"
+              >
+                Voltar p/ Config.
+              </button>
+            </div>
+
+            <div class="card p-5">
+              <h3
+                class="text-lg font-semibold text-default border-b border-gray-200 dark:border-gray-700 pb-2 mb-4"
+              >
+                Criar Novo Usuário
+              </h3>
+              <form id="createUserForm" class="space-y-4">
+                <div>
+                  <label
+                    for="create-user-name"
+                    class="block text-sm font-medium text-muted"
+                    >Nome</label
+                  >
+                  <input
+                    type="text"
+                    id="create-user-name"
+                    required
+                    class="form-input-light"
+                  />
+                </div>
+                <div>
+                  <label
+                    for="create-user-login"
+                    class="block text-sm font-medium text-muted"
+                    >Login (obrigatório)</label
+                  >
+                  <input
+                    type="text"
+                    id="create-user-login"
+                    required
+                    class="form-input-light"
+                  />
+                </div>
+                <div>
+                  <label
+                    for="create-user-email"
+                    class="block text-sm font-medium text-muted"
+                    >Email (opcional)</label
+                  >
+                  <input
+                    type="email"
+                    id="create-user-email"
+                    class="form-input-light"
+                  />
+                </div>
+                <div>
+                  <label
+                    for="create-user-role"
+                    class="block text-sm font-medium text-muted"
+                    >Função (role)</label
+                  >
+                  <select id="create-user-role" class="form-input-light">
+                    <option value="user" selected>Usuário (user)</option>
+                    <option value="admin">Administrador (admin)</option>
+                  </select>
+                </div>
+                <button
+                  type="submit"
+                  class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg"
+                >
+                  Criar Usuário
+                </button>
+                <div id="createUserStatus" class="text-center h-4"></div>
+              </form>
+            </div>
+
+            <div class="card p-5">
+              <h3
+                class="text-lg font-semibold text-default border-b border-gray-200 dark:border-gray-700 pb-2 mb-4"
+              >
+                Gerenciar Usuários
+              </h3>
+              <div id="userListContainer" class="space-y-3">
+                <p class="text-muted">Carregando...</p>
+              </div>
+            </div>
+          </section>
+        </main>
+
+        <nav
+          id="app-nav"
+          class="nav-container fixed bottom-0 left-0 right-0 max-w-md mx-auto z-10 rounded-t-2xl hidden"
+        >
+          <div class="flex justify-around items-center h-20">
+            <a
+              href="#/"
+              class="nav-link flex flex-col items-center justify-center text-muted"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-8 w-8"
+                viewBox="0 0 20 20"
+                fill="currentColor"
+              >
+                <path
+                  fill-rule="evenodd"
+                  d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-11a1 1 0 10-2 0v2H7a1 1 0 100 2h2v2a1 1 0 102 0v-2h2a1 1 0 100-2h-2V7z"
+                  clip-rule="evenodd"
+                />
+              </svg>
+              <span class="text-xs font-medium">Registrar</span>
+            </a>
+            <a
+              href="#/relatorios"
+              class="nav-link flex flex-col items-center justify-center text-muted"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-7 w-7"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V7a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                />
+              </svg>
+              <span class="text-xs font-medium">Relatórios</span>
+            </a>
+            <a
+              href="#/alarmes"
+              class="nav-link flex flex-col items-center justify-center text-muted"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-7 w-7"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1h6z"
+                />
+              </svg>
+              <span class="text-xs font-medium">Alarmes</span>
+            </a>
+            <a
+              href="#/settings"
+              class="nav-link flex flex-col items-center justify-center text-muted"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-7 w-7"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.096 2.572-1.065z"
+                />
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                />
+              </svg>
+              <span class="text-xs font-medium">Ajustes</span>
+            </a>
+          </div>
+        </nav>
+      </div>
+    </div>
+
+    <div
+      id="modal-info-calculo"
+      class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-5 hidden"
+    >
+      <div
+        class="card w-full max-w-md p-6 space-y-4 max-h-[80vh] overflow-y-auto"
+      >
+        <h3 class="text-lg font-bold text-default">
+          Detalhes do Cálculo
+        </h3>
+        
+        <div class="text-sm text-muted border-b border-gray-200 dark:border-gray-700 pb-2">
+           <p class="font-semibold text-default">Seus Ajustes:</p>
+           <div class="flex justify-between pl-2">
+             <span>Salário:</span>
+             <span id="info-settings-salary" class="font-medium text-default">R$ --,--</span>
+           </div>
+           <div class="flex justify-between pl-2">
+             <span>Jornada:</span>
+             <span id="info-settings-jornada" class="font-medium text-default">-- min</span>
+           </div>
+           <div class="flex justify-between pl-2">
+             <span>Dias/Semana:</span>
+             <span id="info-settings-dias" class="font-medium text-default">--</span>
+           </div>
+        </div>
+        
+        <div class="text-sm text-muted">
+          <p class="font-semibold text-default">Valores/Hora Calculados:</p>
+           <div class="flex justify-between pl-2">
+            <span class="text-muted">Valor/Hora (Base):</span>
+            <span id="info-valor-hora" class="font-semibold text-default">R$ --,--</span>
+           </div>
+           <div class="flex justify-between pl-2">
+            <span class="text-muted">Valor/Hora (HE 1.5x):</span>
+            <span id="info-valor-hora-he" class="font-semibold text-default">R$ --,--</span>
+           </div>
+           <div class="flex justify-between pl-2">
+            <span class="text-muted">Valor/Hora (Feriado 2x):</span>
+            <span id="info-valor-hora-feriado" class="font-semibold text-default">R$ --,--</span>
+           </div>
+           <div class="flex justify-between pl-2">
+            <span class="text-muted">Valor/Hora (HE Feriado 3x):</span>
+            <span id="info-valor-hora-he-feriado" class="font-semibold text-default">R$ --,--</span>
+           </div>
+           <div class="flex justify-between pl-2">
+            <span class="text-muted">Valor/Hora (c/ Ad. Noturno):</span>
+            <span id="info-valor-hora-noturno" class="font-semibold text-default">R$ --,--</span>
+           </div>
+        </div>
+
+        <div class="text-sm text-muted border-t border-gray-200 dark:border-gray-700 pt-2">
+          <p class="font-semibold text-default">Valores/Dia Estimados:</p>
+           <div class="flex justify-between pl-2">
+            <span class="text-muted">Dia Normal (Jornada):</span>
+            <span id="info-valor-dia" class="font-semibold text-default">R$ --,--</span>
+           </div>
+           <div class="flex justify-between pl-2">
+            <span class="text-muted">Dia Feriado (Jornada):</span>
+            <span id="info-valor-dia-feriado" class="font-semibold text-default">R$ --,--</span>
+           </div>
+           <div class="flex justify-between pl-2">
+            <span class="text-muted">Dia Completo (Jornada + 2h HE):</span>
+            <span id="info-valor-dia-completo" class="font-semibold text-default">R$ --,--</span>
+           </div>
+           <div class="flex justify-between pl-2">
+            <span class="text-muted">Dia Feriado (Jornada + 2h HE):</span>
+            <span id="info-valor-dia-completo-feriado" class="font-semibold text-default">R$ --,--</span>
+           </div>
+        </div>
+        
+        <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+           <p class="text-xs text-muted italic">
+             <strong>Nota:</strong> O "Valor/Dia (Base)" é uma estimativa ilustrativa. Seu salário base é fixo e não varia. Este valor é uma média e pode não bater exatamente com o valor real do seu dia, a depender da quantidade de dias no mês.
+           </p>
+           <p class="text-xs text-muted italic mt-2">
+             Os cálculos de <strong>Hora Extra</strong> e <strong>Adicionais</strong> são projetados para serem o mais próximo possível da realidade com base nos multiplicadores informados.
+           </p>
+        </div>
+        <button
+          id="btn-close-info-calculo"
+          class="w-full bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg mt-4"
+        >
+          Fechar
+        </button>
+      </div>
+    </div>
+    <div
+      id="modal-set-password"
+      class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-5 hidden"
+    >
+      <div class="card w-full max-w-sm p-6 space-y-4">
+        <h3 class="text-lg font-bold text-default">Definir Senha</h3>
+        <p class="text-sm text-muted">
+          Primeiro acesso. Defina uma senha segura (mín. 6 caracteres).
+        </p>
+        <form id="setPasswordForm" class="space-y-3">
+          <div>
+            <label
+              for="set-new-password"
+              class="block text-sm font-medium text-muted"
+              >Nova Senha</label
+            >
+            <input
+              type="password"
+              id="set-new-password"
+              required
+              class="form-input-light"
+            />
+          </div>
+          <div>
+            <label
+              for="set-repeat-password"
+              class="block text-sm font-medium text-muted"
+              >Repita a Senha</label
+            >
+            <input
+              type="password"
+              id="set-repeat-password"
+              required
+              class="form-input-light"
+            />
+          </div>
+          <button
+            type="submit"
+            class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg"
+          >
+            Definir Senha
+          </button>
+          <div id="setPasswordStatus" class="text-center h-4 mt-1"></div>
+        </form>
+      </div>
+    </div>
+
+    <div
+      id="modal-change-password"
+      class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-5 hidden"
+    >
+      <div class="card w-full max-w-sm p-6 space-y-4">
+        <h3 class="text-lg font-bold text-default">Alterar Senha</h3>
+        <form id="changePasswordForm" class="space-y-3">
+          <div>
+            <label
+              for="change-current-password"
+              class="block text-sm font-medium text-muted"
+              >Senha Atual</label
+            >
+            <input
+              type="password"
+              id="change-current-password"
+              required
+              class="form-input-light"
+            />
+          </div>
+          <div>
+            <label
+              for="change-new-password"
+              class="block text-sm font-medium text-muted"
+              >Nova Senha</label
+            >
+            <input
+              type="password"
+              id="change-new-password"
+              required
+              class="form-input-light"
+            />
+          </div>
+          <div>
+            <label
+              for="change-repeat-password"
+              class="block text-sm font-medium text-muted"
+              >Repita a Nova Senha</label
+            >
+            <input
+              type="password"
+              id="change-repeat-password"
+              required
+              class="form-input-light"
+            />
+          </div>
+          <button
+            type="submit"
+            class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg"
+          >
+            Alterar Senha
+          </button>
+          <div id="changePasswordStatus" class="text-center h-4 mt-1"></div>
+        </form>
+        <button
+          id="btn-cancel-change-password"
+          class="w-full text-center text-muted hover:text-red-500 mt-2"
+        >
+          Cancelar
+        </button>
+      </div>
+    </div>
+
+    <div
+      id="modal-point-record"
+      class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-5 hidden"
+    >
+      <div class="card w-full max-w-sm overflow-hidden" style="border-radius: 0.75rem;">
+        <div class="p-6 space-y-4">
+          <h3 id="modal-title" class="text-lg font-bold text-default">
+            Registrar Ponto
+          </h3>
+          <button
+            id="modal-btn-now"
+            class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg text-lg"
+          >
+            Agora (12:34)
+          </button>
+          <div
+            id="modal-or-divider"
+            class="flex items-center"
+            aria-hidden="true"
+          >
+            <div class="w-full border-t border-gray-300 dark:border-gray-600"></div>
+            <div class="px-3 text-sm text-muted">OU</div>
+            <div class="w-full border-t border-gray-300 dark:border-gray-600"></div>
+          </div>
+          <form id="modal-form-manual" class="space-y-0">
+            <label for="modal-input-time" class="block text-sm font-medium text-muted mb-1"
+              >Registrar manualmente:</label
+            >
+            
+            <input
+              type="text" 
+              id="modal-input-time"
+              class="form-input-light text-lg"
+              inputmode="none"
+              placeholder="--:--"
+            />
+            
+            </form>
+        </div>
+        
+        <div id="virtual-keyboard" class="virtual-keyboard">
+          <button class="virtual-keyboard-btn" data-key="1">1</button>
+          <button class="virtual-keyboard-btn" data-key="2">2</button>
+          <button class="virtual-keyboard-btn" data-key="3">3</button>
+          <button class="virtual-keyboard-btn" data-key="4">4</button>
+          <button class="virtual-keyboard-btn" data-key="5">5</button>
+          <button class="virtual-keyboard-btn" data-key="6">6</button>
+          <button class="virtual-keyboard-btn" data-key="7">7</button>
+          <button class="virtual-keyboard-btn" data-key="8">8</button>
+          <button class="virtual-keyboard-btn" data-key="9">9</button>
+          <button class="virtual-keyboard-btn action" data-key="backspace">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+          <button class="virtual-keyboard-btn" data-key="0">0</button>
+          <button class="virtual-keyboard-btn action" data-key="enter">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </button>
+        </div>
+
+        <button
+          id="modal-btn-cancel"
+          class="w-full text-center text-muted hover:text-red-500 py-4"
+        >
+          Cancelar
+        </button>
+      </div>
+    </div>
+
+    <div
+      id="modal-finalize-day"
+      class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-5 hidden"
+    >
+      <div class="card w-full max-w-sm p-6 space-y-4 text-center">
+        <h3 class="text-lg font-bold text-default">Finalizar o Dia?</h3>
+        <p class="text-sm text-muted">
+          Você registrou sua Saída. Deseja finalizar este dia? Você não poderá
+          fazer mais alterações após finalizar.
+        </p>
+        <div class="flex space-x-3 pt-2">
+          <button
+            id="btn-finalize-no"
+            class="w-full bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg"
+          >
+            Não (Sair)
+          </button>
+          <button
+            id="btn-finalize-yes"
+            class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg"
+          >
+            Sim (Finalizar)
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      id="modal-daily-report"
+      class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-5 hidden"
+    >
+      <div
+        class="card w-full max-w-md max-h-[90vh] flex flex-col"
+        style="border-radius: 1rem"
+      >
+        <div class="p-6 overflow-y-auto" id="report-content">
+          <h3 class="text-xl font-bold text-default text-center">
+            Relatório do Dia
+          </h3>
+          <p id="report-date" class="text-center text-muted text-sm mb-4">
+            10 de Julho de 2024
+          </p>
+
+          <div
+            class="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg mb-4"
+            style="border-radius: 0.75rem"
+          >
+            <h4
+              class="font-semibold text-default border-b border-gray-300 dark:border-gray-700 pb-2 mb-2"
+            >
+              Registros
+            </h4>
+            <ul
+              id="report-events-list"
+              class="space-y-1 text-sm text-muted"
+            >
+              <li>Entrada: 07:00</li>
+              <li>Saída Almoço: 12:00</li>
+              <li>Retorno Almoço: 13:00</li>
+              <li>Saída: 15:20</li>
+            </ul>
+          </div>
+
+          <div
+            class="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg"
+            style="border-radius: 0.75rem"
+          >
+            <h4
+              class="font-semibold text-default border-b border-gray-300 dark:border-gray-700 pb-2 mb-2"
+            >
+              Resumo
+            </h4>
+            <div class="space-y-2 text-sm">
+              <div class="flex justify-between">
+                <span class="text-muted">Jornada Esperada:</span>
+                <span id="report-jornada" class="font-medium text-default"
+                  >440 min</span
+                >
+              </div>
+              <div class="flex justify-between">
+                <span class="text-muted">Total Trabalhado:</span>
+                <span
+                  id="report-total-trabalhado"
+                  class="font-medium text-default"
+                  >440 min</span
+                >
+              </div>
+              <div class="flex justify-between">
+                <span class="text-muted">Tempo Almoço:</span>
+                <span
+                  id="report-total-almoco"
+                  class="font-medium text-default"
+                  >60 min</span
+                >
+              </div>
+              <div class="flex justify-between">
+                <span class="text-muted">Tempo Pausas:</span>
+                <span
+                  id="report-total-pausas"
+                  class="font-medium text-default"
+                  >0 min</span
+                >
+              </div>
+              <hr class="border-gray-300 dark:border-gray-700" />
+              <div class="flex justify-between">
+                <span class="text-muted">Saldo (HE/Déficit):</span>
+                <span id="report-he-deficit" class="font-bold text-default"
+                  >0 min</s
+                >
+              </div>
+               <div id="report-estourado-container" class="flex justify-between hidden">
+                <span class="text-muted">Tempo Estourado:</span>
+                <span id="report-estourado" class="font-bold text-red-500"
+                  >0 min</s
+                >
+              </div>
+              <hr class="border-gray-300 dark:border-gray-700" />
+              <div class="flex justify-between text-base">
+                <span class="font-semibold text-default">Farm Total:</span>
+                <span
+                  id="report-farm-total"
+                  class="font-bold text-green-500"
+                  >R$ 0,00</span
+                >
+              </div>
+            </div>
+          </div>
+        </div>
+        <div
+          class="p-4 border-t border-gray-200 dark:border-gray-700 flex space-x-3"
+        >
+          <button
+            id="btn-download-png"
+            class="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg"
+          >
+            Baixar (.png)
+          </button>
+          <button
+            id="btn-close-report"
+            class="w-full bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg"
+          >
+            Fechar
+          </button>
+        </div>
+      </div>
+    </div>
+    
+    <div
+      id="modal-return-time"
+      class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-5 hidden"
+    >
+      <div class="card w-full max-w-sm p-6 space-y-4 text-center">
+        <h3 id="modal-return-title" class="text-lg font-bold text-default">Pausa Iniciada</h3>
+        <p class="text-sm text-muted">
+          Seu retorno está agendado para as:
+        </p>
+        <p id="modal-return-time-display" class="text-5xl font-bold text-blue-500 dark:text-blue-400 my-2">
+          13:40
+        </p>
+        <button
+          id="btn-close-modal-return"
+          class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg"
+        >
+          Entendido
+        </button>
+      </div>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
