@@ -7,9 +7,9 @@ const jwt = require("jsonwebtoken");
 
 const app = express();
 const PORT = 3001;
-const JWT_SECRET =
-  process.env.JWT_SECRET || "seu-segredo-super-secreto-aqui-troque-isso";
+const JWT_SECRET = process.env.JWT_SECRET || "seu-segredo-super-secreto-aqui-troque-isso";
 const SALT_ROUNDS = 10;
+const START_DATE_AUDIT = "2026-01-01"; // Marco Zero do Auditor
 
 app.use(cors());
 app.use(express.json());
@@ -23,13 +23,11 @@ const authenticateToken = (req, res, next) => {
   const token = authHeader && authHeader.split(" ")[1];
 
   if (token == null) {
-    console.warn("Tentativa de acesso sem token.");
     return res.sendStatus(401);
   }
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
-      console.warn("Token inválido ou expirado:", err.message);
       return res.sendStatus(403);
     }
     req.user = user;
@@ -42,1328 +40,809 @@ const isAdmin = (req, res, next) => {
   if (req.user && req.user.role === "admin") {
     next();
   } else {
-    console.warn("Tentativa de acesso admin negada para:", req.user?.login);
-    res
-      .status(403)
-      .json({ error: "Acesso negado. Requer privilégios de administrador." });
+    res.status(403).json({ error: "Acesso restrito a administradores." });
   }
 };
 
-// --- Funções Auxiliares (Helpers) ---
+// --- Rotas de Autenticação ---
 
-// (NOVO V30) Função helper para pegar a data de "hoje" no fuso do usuário
-async function getTodayDateForUser(userId) {
-  const settingsSql = "SELECT timezone FROM userSettings WHERE userId = ?";
-  const settings = await new Promise((resolve, reject) => {
-    db.get(settingsSql, [userId], (err, row) =>
-      err ? reject(err) : resolve(row || {})
-    );
-  });
-  const userTimezone = settings.timezone || "America/Sao_Paulo"; // Default
-
-  const todayDate = new Date().toLocaleDateString("en-CA", {
-    timeZone: userTimezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  return todayDate;
-}
-
-function timeToMinutes(timeStr) {
-  if (!timeStr || !timeStr.includes(":")) return 0;
-  const parts = timeStr.split(":");
-  if (parts.length < 2) return 0;
-  const hours = parseInt(parts[0], 10);
-  const minutes = parseInt(parts[1], 10);
-  if (isNaN(hours) || isNaN(minutes)) return 0;
-  return hours * 60 + minutes;
-}
-
-/**
- * (REATORADO V42) Lógica principal de cálculo de métricas do dia.
- * Agora separa os adicionais (Feriado, Noturno) dos valores base.
- */
-function calculateBackendMetrics(events, settings, isHoliday, isSunday) {
-  // --- Estado Inicial ---
-  let work_minutes = 0;
-  let pause_minutes_total = 0;
-  let almoco_minutes_total = 0;
-  let night_shift_minutes = 0; // Minutos trabalhados em horário noturno
-  let saida_sugerida_minutes = null;
-  let atraso_minutes = 0;
-  let excesso_almoco_minutes = 0;
-
-  // --- Valores de Moeda (Farm) ---
-  let farm_jornada_value = 0; // Valor das horas normais (1.0x)
-  let farm_he_value = 0; // Valor das horas extras (1.5x)
-  let farm_estourado_value = 0; // Valor das horas extras estouradas (1.5x)
-  let farm_adicional_noturno_value = 0; // *Apenas* o adicional (20%)
-  let farm_adicional_feriado_value = 0; // *Apenas* o adicional (1.0x)
-
-  // --- Minutos Trabalhados ---
-  let effective_worked_minutes = 0;
-  let counted_pause_minutes = 0;
-  let extra_minutes = 0;
-  let estourado_minutes = 0;
-  let deficit_minutes = 0;
-
-  // --- Valores por Minuto ---
-  let valor_por_minuto_base = 0; // (V42) O valor 1.0x
-  let valor_por_minuto_he_total = 0; // (V42) O valor total da HE (ex: 1.5x)
-  let valor_por_minuto_adicional_feriado = 0; // (V42) O valor *adicional* (1.0x)
-
-  const s = settings;
-
-  // --- Flags de Configuração ---
-  const disableSunday = !!s.disable_sunday_auto_multiplier;
-  const isDayWithMultiplier = isHoliday || (isSunday && !disableSunday);
-  const isAlmocoPago = !!s.is_almoco_pago;
-  const jornada_dia = s.jornada_diaria_minutes || 0;
-  const max_he = s.max_he_minutes || 120;
-
-  const NIGHT_SHIFT_START_MINUTES = 22 * 60; // 22:00 (1320)
-  const NIGHT_SHIFT_END_MINUTES = 5 * 60; // 05:00 (300)
-  const MIDNIGHT_MINUTES = 24 * 60; // (1440)
-
-  // --- 1. Cálculo de Minutos Trabalhados e Noturnos ---
-  let lastTime = null;
-  let lastType = null;
-
-  const entradaEvent = events.find((e) => e.type === "entrada");
-  if (entradaEvent && s.entrada_padrao) {
-    const entradaPadraoMin = timeToMinutes(s.entrada_padrao);
-    const entradaRealMin = timeToMinutes(entradaEvent.time);
-    atraso_minutes = Math.max(0, entradaRealMin - entradaPadraoMin);
-  }
-
-  for (const event of events) {
-    const currentTime = timeToMinutes(event.time);
-    if (lastType && lastTime !== null) {
-      const duration = currentTime - lastTime;
-      if (duration >= 0) {
-        if (
-          lastType === "entrada" ||
-          lastType === "almoco_retorno" ||
-          lastType === "pausa_end"
-        ) {
-          work_minutes += duration;
-
-          // Cálculo de Adicional Noturno
-          const start = lastTime;
-          const end = currentTime;
-          let overlap = 0;
-          // Período 1: Das 22:00 às 00:00
-          overlap += Math.max(
-            0,
-            Math.min(end, MIDNIGHT_MINUTES) -
-              Math.max(start, NIGHT_SHIFT_START_MINUTES)
-          );
-          // Período 2: Das 00:00 às 05:00
-          overlap += Math.max(
-            0,
-            Math.min(end, NIGHT_SHIFT_END_MINUTES) - Math.max(start, 0)
-          );
-          night_shift_minutes += overlap;
-        } else if (lastType === "pausa_start") {
-          pause_minutes_total += duration;
-        } else if (lastType === "almoco_saida") {
-          almoco_minutes_total += duration;
-        }
-      }
-    }
-    lastTime = currentTime;
-    lastType = event.type;
-  }
-
-  // --- 2. Cálculo de Minutos Efetivos (Contando Pausas e Almoço Pago) ---
-  const almocoRetornoEvent = events.find((e) => e.type === "almoco_retorno");
-  if (almocoRetornoEvent && s.tempo_almoco_minutes > 0) {
-    excesso_almoco_minutes = Math.max(
-      0,
-      almoco_minutes_total - s.tempo_almoco_minutes
-    );
-  }
-
-  if (s.has_15min_pause) {
-    // (V41) Lógica de 15min por dia
-    counted_pause_minutes = Math.min(pause_minutes_total, 15);
-  }
-
-  effective_worked_minutes = work_minutes + counted_pause_minutes;
-  if (isAlmocoPago) {
-    effective_worked_minutes += almoco_minutes_total;
-  }
-
-  // --- 3. Cálculo da Saída Sugerida ---
-  if (entradaEvent) {
-    const entradaMinutes = timeToMinutes(entradaEvent.time);
-    const totalPauseNotCounted = pause_minutes_total - counted_pause_minutes;
-
-    let almocoConsiderado = 0;
-    if (!isAlmocoPago) {
-      const almocoCompleto = !!almocoRetornoEvent;
-      const almocoIniciado = events.some((e) => e.type === "almoco_saida");
-
-      if (almocoCompleto) {
-        almocoConsiderado = almoco_minutes_total; // Usa o tempo real
-      } else if (!almocoIniciado) {
-        almocoConsiderado = s.tempo_almoco_minutes || 0; // Usa o tempo padrão
-      }
-    }
-
-    const jornadaTotalEstimada =
-      jornada_dia + almocoConsiderado + totalPauseNotCounted;
-    saida_sugerida_minutes = entradaMinutes + jornadaTotalEstimada;
-  }
-
-  // --- 4. Cálculo dos Valores por Minuto ---
-  let valorH = 0,
-    valorHE = 0,
-    valorHF_Adicional = 0;
-
-  // (MODELO RH) Usa o divisor mensal configurado pelo usuário (padrão 220)
-  const divisor_mensal = s.divisor_mensal || 220;
-
-  if (s.salary_monthly > 0 && divisor_mensal > 0) {
-    valorH = s.salary_monthly / divisor_mensal;      // Valor/Hora Base (1.0x)
-    valorHE = valorH * (s.multiplicador_hora_extra || 1.5); // Valor/Hora Extra (1.5x)
-
-    // Valor ADICIONAL de feriado/domingo
-    const multFeriado = s.multiplicador_feriado_domingo || 2.0;
-    valorHF_Adicional = valorH * (multFeriado - 1.0);
-
-    valor_por_minuto_base = valorH / 60;
-    valor_por_minuto_he_total = valorHE / 60;
-    valor_por_minuto_adicional_feriado = valorHF_Adicional / 60;
-  }
-
-  // --- 5. Cálculo dos Minutos (Base, HE, Estourado, Déficit) ---
-  const base_minutes = Math.min(effective_worked_minutes, jornada_dia);
-  const total_minutos_alem_jornada = Math.max(
-    0,
-    effective_worked_minutes - jornada_dia
-  );
-
-  extra_minutes = Math.min(total_minutos_alem_jornada, max_he);
-  estourado_minutes = Math.max(0, total_minutos_alem_jornada - max_he);
-
-  const saidaEvent = events.find((e) => e.type === "saida");
-  if (!saidaEvent && total_minutos_alem_jornada === 0 && jornada_dia > 0) {
-    deficit_minutes = Math.max(0, jornada_dia - effective_worked_minutes);
-  }
-
-  // --- 5b. Cálculo de Minutos Compensados (mesmo dia) ---
-  // Lógica: se houve atraso E o usuário ficou além do horário de saída ideal no mesmo dia,
-  // os minutos excedentes são considerados compensados (até o limite do atraso do dia).
-  let compensado_minutes = 0;
-  if (saidaEvent && atraso_minutes > 0 && s.saida_padrao) {
-    const saidaPadraoMin = timeToMinutes(s.saida_padrao);
-    const saidaRealMin = timeToMinutes(saidaEvent.time);
-    const minutosAlemSaida = Math.max(0, saidaRealMin - saidaPadraoMin);
-    // Só conta como compensado o que foi além da saída E não excede o próprio atraso
-    compensado_minutes = Math.min(atraso_minutes, minutosAlemSaida);
-  }
-
-  // --- 6. (REATORADO V42) Cálculo dos Valores (Farm) ---
-
-  // 6.1. Farm Base (Jornada e HE) - Sempre calculado
-  farm_jornada_value = base_minutes * valor_por_minuto_base; // 1.0x
-
-  // (V42) Lógica 3x Corrigida: A HE é 1.5x da hora de feriado (2.0x), então 3.0x.
-  if (isDayWithMultiplier) {
-    const valor_hora_feriado =
-      valor_por_minuto_base * (s.multiplicador_feriado_domingo || 2.0);
-    const valor_he_feriado =
-      (valor_hora_feriado * (s.multiplicador_hora_extra || 1.5)) / 60;
-
-    farm_he_value = extra_minutes * valor_he_feriado;
-    farm_estourado_value = estourado_minutes * valor_he_feriado;
-  } else {
-    farm_he_value = extra_minutes * valor_por_minuto_he_total; // 1.5x
-    farm_estourado_value = estourado_minutes * valor_por_minuto_he_total; // 1.5x
-  }
-
-  // 6.2. Farm Adicional Noturno
-  if (night_shift_minutes > 0 && valorH > 0) {
-    const nightPercent = (s.adicional_noturno_percent || 0) / 100;
-    // (V42) O adicional é pago sobre a hora normal (valorH)
-    farm_adicional_noturno_value =
-      (night_shift_minutes / 60) * valorH * nightPercent;
-  }
-
-  // 6.3. Farm Adicional Feriado/Domingo
-  if (isDayWithMultiplier) {
-    // Paga o adicional (1.0x) sobre *apenas* os minutos da JORNADA
-    // O adicional da HE já foi embutido no 3.0x
-    farm_adicional_feriado_value =
-      base_minutes * valor_por_minuto_adicional_feriado;
-  }
-
-  // --- 7. Retorno dos Agregados ---
-  return {
-    effective_worked_minutes: Math.round(effective_worked_minutes),
-    almoco_minutes_total: Math.round(almoco_minutes_total),
-    pause_minutes_total: Math.round(pause_minutes_total),
-    counted_pause_minutes: Math.round(counted_pause_minutes),
-    saida_sugerida_minutes: saida_sugerida_minutes
-      ? Math.round(saida_sugerida_minutes)
-      : null,
-    atraso_minutes: Math.round(atraso_minutes),
-    compensado_minutes: Math.round(compensado_minutes),  // (MODELO RH) novo campo
-    excesso_almoco_minutes: Math.round(excesso_almoco_minutes),
-    extra_minutes: Math.round(extra_minutes),
-    estourado_minutes: Math.round(estourado_minutes),
-    deficit_minutes: Math.round(deficit_minutes),
-    night_shift_minutes: Math.round(night_shift_minutes),
-    saida_real_minutes: saidaEvent ? timeToMinutes(saidaEvent.time) : null,
-
-    // Valores (Farm)
-    farm_jornada_value: parseFloat(farm_jornada_value.toFixed(2)),
-    farm_he_value: parseFloat(farm_he_value.toFixed(2)),
-    farm_estourado_value: parseFloat(farm_estourado_value.toFixed(2)),
-    farm_adicional_noturno_value: parseFloat(
-      farm_adicional_noturno_value.toFixed(2)
-    ),
-    farm_adicional_feriado_value: parseFloat(
-      farm_adicional_feriado_value.toFixed(2)
-    ),
-
-    // Multiplicadores (para UI)
-    is_sunday: isSunday,
-    is_day_with_multiplier: isDayWithMultiplier,
-
-    // Valores por Minuto (para UI)
-    valor_por_minuto: parseFloat(valor_por_minuto_base.toFixed(4)),
-    valor_por_minuto_extra: parseFloat(valor_por_minuto_he_total.toFixed(4)),
-    valor_por_minuto_adicional_feriado: parseFloat(
-      valor_por_minuto_adicional_feriado.toFixed(4)
-    ),
-  };
-}
-
-// --- API Endpoints ---
-
-// (ATUALIZADO V29) Auth Routes - Usa 'login' em vez de 'email'
+// Login
 app.post("/api/auth/login", (req, res) => {
   const { login, password } = req.body;
+
   if (!login || !password) {
-    return res.status(400).json({
-      error: "Login e senha são obrigatórios.",
-    });
+    return res.status(400).json({ error: "Login e senha são obrigatórios." });
   }
 
   const sql = "SELECT * FROM users WHERE login = ?";
   db.get(sql, [login], (err, user) => {
     if (err) {
-      console.error("Erro DB no login:", err);
-      return res.status(500).json({ error: "Erro interno ao buscar usuário." });
+      console.error("Erro no DB (login):", err.message);
+      return res.status(500).json({ error: "Erro interno do servidor." });
     }
     if (!user) {
-      console.log(`Login falhou (usuário não encontrado): ${login}`);
       return res.status(401).json({ error: "Credenciais inválidas." });
     }
 
-    if (user.is_first_login && password === "dummy") {
-      console.log(`Primeiro login detectado para: ${login}`);
-      const tokenPayload = {
-        userId: user.userId,
-        login: user.login,
-        email: user.email,
-        role: user.role,
-        name: user.name,
-        firstLogin: true,
-      };
-      const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: "15m" });
-      return res.json({ token, user: tokenPayload });
-    }
-
-    if (user.is_first_login && password !== "dummy") {
-      console.log(`Tentativa de login com senha no primeiro acesso: ${login}`);
-      return res.status(401).json({
-        error: "Primeiro acesso: deixe a senha em branco e clique em Entrar.",
-      });
-    }
-
-    if (!user.password_hash) {
-      console.error(`Usuário ${login} sem hash de senha no banco!`);
-      return res.status(500).json({ error: "Erro de configuração da conta." });
-    }
-
-    bcrypt.compare(password, user.password_hash, (err, result) => {
-      if (err) {
-        console.error("Erro no bcrypt.compare:", err);
-        return res.status(500).json({ error: "Erro interno na autenticação." });
-      }
-      if (!result) {
-        console.log(`Login falhou (senha incorreta): ${login}`);
-        return res.status(401).json({ error: "Credenciais inválidas." });
+    bcrypt.compare(password, user.password_hash, (errHash, result) => {
+      if (errHash) {
+        return res.status(500).json({ error: "Erro ao verificar senha." });
       }
 
-      console.log(`Login bem-sucedido para: ${login}`);
-      const tokenPayload = {
-        userId: user.userId,
-        login: user.login,
-        email: user.email,
-        role: user.role,
-        name: user.name,
-        firstLogin: false,
-      };
-      const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: "8h" });
-      res.json({ token, user: tokenPayload });
+      if (result || (user.is_first_login && password === "dummy")) {
+        const token = jwt.sign(
+          {
+            userId: user.userId,
+            login: user.login,
+            name: user.name,
+            role: user.role,
+            firstLogin: !!user.is_first_login,
+          },
+          JWT_SECRET,
+          { expiresIn: "24h" }
+        );
+
+        res.json({
+          message: "Login realizado com sucesso.",
+          token,
+          user: {
+            userId: user.userId,
+            name: user.name,
+            login: user.login,
+            email: user.email,
+            role: user.role,
+            firstLogin: !!user.is_first_login,
+          },
+        });
+      } else {
+        res.status(401).json({ error: "Credenciais inválidas." });
+      }
     });
   });
 });
 
-// Definir senha (Primeiro Login)
+// Definir Senha
 app.put("/api/auth/set-password", authenticateToken, (req, res) => {
-  if (!req.user || !req.user.firstLogin) {
-    return res.status(403).json({
-      error: "Ação não permitida. Token inválido para definir senha.",
-    });
-  }
   const { newPassword, repeatPassword } = req.body;
-  if (!newPassword || newPassword !== repeatPassword) {
-    return res
-      .status(400)
-      .json({ error: "Senhas não conferem ou estão vazias." });
+  const userId = req.user.userId;
+
+  if (!req.user.firstLogin) {
+    return res.status(403).json({ error: "Você já definiu sua senha." });
   }
-  if (newPassword.length < 6) {
-    return res
-      .status(400)
-      .json({ error: "Senha deve ter no mínimo 6 caracteres." });
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: "A senha deve ter no mínimo 6 caracteres." });
+  }
+  if (newPassword !== repeatPassword) {
+    return res.status(400).json({ error: "As senhas não conferem." });
   }
 
   bcrypt.hash(newPassword, SALT_ROUNDS, (err, hash) => {
-    if (err) {
-      console.error("Erro ao gerar hash (set-password):", err);
-      return res
-        .status(500)
-        .json({ error: "Erro interno ao processar senha." });
-    }
+    if (err) return res.status(500).json({ error: "Erro ao criptografar." });
 
-    const sql =
-      "UPDATE users SET password_hash = ?, is_first_login = 0 WHERE userId = ? AND is_first_login = 1";
-    db.run(sql, [hash, req.user.userId], function (err) {
-      if (err) {
-        console.error("Erro DB (set-password):", err);
-        return res.status(500).json({ error: "Erro ao salvar nova senha." });
-      }
-      if (this.changes === 0) {
-        return res
-          .status(400)
-          .json({ error: "Operação inválida ou já realizada." });
-      }
-      console.log(`Senha definida para usuário ${req.user.userId}`);
-      res.json({
-        success: true,
-        message: "Senha definida com sucesso. Faça login novamente.",
-      });
+    const sql = "UPDATE users SET password_hash = ?, is_first_login = 0 WHERE userId = ?";
+    db.run(sql, [hash, userId], function (errDb) {
+      if (errDb) return res.status(500).json({ error: "Erro ao atualizar DB." });
+      res.json({ success: true, message: "Senha definida com sucesso." });
     });
   });
 });
 
-// Alterar Senha (Usuário Logado)
+// Alterar Senha
 app.put("/api/auth/change-password", authenticateToken, (req, res) => {
-  if (!req.user || req.user.firstLogin) {
-    return res
-      .status(403)
-      .json({ error: "Defina sua senha inicial primeiro ou token inválido." });
-  }
   const { currentPassword, newPassword, repeatPassword } = req.body;
-  if (!currentPassword || !newPassword || newPassword !== repeatPassword) {
-    return res.status(400).json({
-      error:
-        "Todos os campos são obrigatórios e as novas senhas devem conferir.",
-    });
+  const userId = req.user.userId;
+
+  if (!currentPassword || !newPassword || !repeatPassword) {
+    return res.status(400).json({ error: "Todos os campos são obrigatórios." });
   }
-  if (newPassword.length < 6) {
-    return res
-      .status(400)
-      .json({ error: "Nova senha deve ter no mínimo 6 caracteres." });
+  if (newPassword !== repeatPassword) {
+    return res.status(400).json({ error: "As novas senhas não conferem." });
   }
 
-  const sqlSelect = "SELECT password_hash FROM users WHERE userId = ?";
-  db.get(sqlSelect, [req.user.userId], (err, user) => {
-    if (err || !user) {
-      return res
-        .status(500)
-        .json({ error: "Erro ao buscar dados do usuário." });
-    }
+  db.get("SELECT password_hash FROM users WHERE userId = ?", [userId], (err, user) => {
+    if (err || !user) return res.status(500).json({ error: "Erro usuário." });
 
-    bcrypt.compare(currentPassword, user.password_hash, (err, result) => {
-      if (err) {
-        return res
-          .status(500)
-          .json({ error: "Erro interno ao verificar senha." });
-      }
-      if (!result) {
-        return res.status(401).json({ error: "Senha atual incorreta." });
-      }
+    bcrypt.compare(currentPassword, user.password_hash, (errCmp, result) => {
+      if (!result) return res.status(401).json({ error: "Senha atual incorreta." });
 
-      bcrypt.hash(newPassword, SALT_ROUNDS, (err, newHash) => {
-        if (err) {
-          return res
-            .status(500)
-            .json({ error: "Erro interno ao processar nova senha." });
-        }
-        const sqlUpdate = "UPDATE users SET password_hash = ? WHERE userId = ?";
-        db.run(sqlUpdate, [newHash, req.user.userId], function (err) {
-          if (err) {
-            return res
-              .status(500)
-              .json({ error: "Erro ao salvar nova senha." });
-          }
-          console.log(`Senha alterada para usuário ${req.user.userId}`);
-          res.json({ success: true, message: "Senha alterada com sucesso." });
+      bcrypt.hash(newPassword, SALT_ROUNDS, (errHash, hash) => {
+        if (errHash) return res.status(500).json({ error: "Erro criptografia." });
+        db.run("UPDATE users SET password_hash = ? WHERE userId = ?", [hash, userId], (errUp) => {
+          if (errUp) return res.status(500).json({ error: "Erro atualização." });
+          res.json({ success: true, message: "Senha alterada." });
         });
       });
     });
   });
 });
 
-// --- User Routes (Protegidas) ---
+// --- Rotas de Usuário / Configurações ---
 
-// (ATUALIZADO V29) Obter dados do usuário logado + settings (combinado)
 app.get("/api/me", authenticateToken, (req, res) => {
   const userId = req.user.userId;
-  const sql = `
-        SELECT u.userId, u.name, u.login, u.email, u.role, u.is_first_login,
-               s.salary_monthly, s.jornada_diaria_minutes, s.entrada_padrao, s.saida_almoco_padrao,
-               s.retorno_almoco_padrao, s.saida_padrao, s.tempo_almoco_minutes, s.dias_trabalho_por_semana,
-               s.multiplicador_hora_extra, s.multiplicador_feriado_domingo, s.fgts_percent, s.has_15min_pause,
-               s.pause_policy, s.tolerancia_entrada_minutes, s.alert_voice_on, s.timezone,
-               s.adicional_noturno_percent, s.disable_sunday_auto_multiplier,
-               s.is_almoco_pago, s.max_he_minutes,
-               s.dsr_ativo, s.horas_extras_padrao_dia,
-               s.divisor_mensal, s.dias_trabalho, s.domingo_policy
-        FROM users u
-        LEFT JOIN userSettings s ON u.userId = s.userId
-        WHERE u.userId = ?`;
+  const sqlUser = "SELECT userId, name, login, email, role, is_first_login FROM users WHERE userId = ?";
+  const sqlSettings = "SELECT * FROM userSettings WHERE userId = ?";
 
-  db.get(sql, [userId], (err, row) => {
-    if (err) {
-      console.error(`Erro DB (get /api/me) para userId ${userId}:`, err);
-      return res
-        .status(500)
-        .json({ error: "Erro ao buscar dados do usuário." });
-    }
-    if (!row) {
-      return res.status(404).json({ error: "Usuário não encontrado." });
-    }
+  db.get(sqlUser, [userId], (err, user) => {
+    if (err) return res.status(500).json({ error: "Erro DB User" });
+    if (!user) return res.status(404).json({ error: "Usuário não encontrado" });
 
-    const user = {
-      userId: row.userId,
-      name: row.name,
-      login: row.login, // (MUDANÇA)
-      email: row.email,
-      role: row.role,
-      is_first_login: row.is_first_login,
-    };
-
-    const settings = {};
-    const settingKeys = [
-      "salary_monthly",
-      "jornada_diaria_minutes",
-      "entrada_padrao",
-      "saida_almoco_padrao",
-      "retorno_almoco_padrao",
-      "saida_padrao",
-      "tempo_almoco_minutes",
-      "dias_trabalho_por_semana",
-      "multiplicador_hora_extra",
-      "multiplicador_feriado_domingo",
-      "fgts_percent",
-      "has_15min_pause",
-      "pause_policy",
-      "tolerancia_entrada_minutes",
-      "alert_voice_on",
-      "timezone",
-      "adicional_noturno_percent",
-      "disable_sunday_auto_multiplier",
-      "is_almoco_pago",
-      "max_he_minutes",
-      "dsr_ativo",
-      "horas_extras_padrao_dia",
-      "divisor_mensal",
-      "dias_trabalho",
-      "domingo_policy",
-    ];
-
-    settingKeys.forEach((key) => {
-      settings[key] = row[key];
+    db.get(sqlSettings, [userId], (errS, settings) => {
+      if (errS) return res.status(500).json({ error: "Erro DB Settings" });
+      res.json({
+        user: {
+          userId: user.userId,
+          name: user.name,
+          login: user.login,
+          email: user.email,
+          role: user.role,
+          firstLogin: !!user.is_first_login,
+        },
+        settings: settings || {},
+      });
     });
-
-    res.json({ user, settings });
   });
 });
 
-// (ATUALIZADO V29) Atualizar Configurações do Usuário
 app.put("/api/me/settings", authenticateToken, (req, res) => {
   const userId = req.user.userId;
-
-  const allSettingColumns = [
-    "salary_monthly",
-    "jornada_diaria_minutes",
-    "entrada_padrao",
-    "saida_almoco_padrao",
-    "retorno_almoco_padrao",
-    "saida_padrao",
-    "tempo_almoco_minutes",
-    "dias_trabalho_por_semana",
-    "multiplicador_hora_extra",
-    "multiplicador_feriado_domingo",
-    "fgts_percent",
-    "has_15min_pause",
-    "pause_policy",
-    "tolerancia_entrada_minutes",
-    "alert_voice_on",
-    "timezone",
-    "adicional_noturno_percent",
-    "disable_sunday_auto_multiplier",
-    "is_almoco_pago",
-    "max_he_minutes",
-    "dsr_ativo",
-    "horas_extras_padrao_dia",
-    "divisor_mensal",
-    "dias_trabalho",
-    "domingo_policy",
+  const s = req.body;
+  const allowedFields = [
+    "salary_monthly", "jornada_diaria_minutes", "entrada_padrao", "saida_almoco_padrao",
+    "retorno_almoco_padrao", "saida_padrao", "tempo_almoco_minutes", "dias_trabalho_por_semana",
+    "multiplicador_hora_extra", "multiplicador_feriado_domingo", "fgts_percent", "has_15min_pause",
+    "pause_policy", "tolerancia_entrada_minutes", "alert_voice_on", "timezone",
+    "adicional_noturno_percent", "disable_sunday_auto_multiplier", "is_almoco_pago", "max_he_minutes",
+    "scale_type", "scale_work_days", "scale_12x36_anchor_date", "sunday_rule", "sunday_multiplier", "holiday_multiplier"
   ];
 
-  const validFields = Object.keys(req.body).filter((f) =>
-    allSettingColumns.includes(f)
-  );
-
-  if (validFields.length === 0) {
-    return res
-      .status(400)
-      .json({ error: "Nenhum campo de configuração válido foi enviado." });
-  }
-
-  const columns = ["userId", ...validFields];
-  const placeholders = columns.map(() => "?").join(", ");
-  const values = [userId, ...validFields.map((field) => req.body[field])];
-
-  const sql = `INSERT OR REPLACE INTO userSettings (${columns.join(
-    ", "
-  )}) VALUES (${placeholders})`;
-
-  db.run(sql, values, function (err) {
-    if (err) {
-      console.error("Erro DB (put /me/settings):", err);
-      return res.status(500).json({ error: "Erro ao salvar configurações." });
+  let updates = [];
+  let params = [];
+  allowedFields.forEach((field) => {
+    if (s[field] !== undefined) {
+      updates.push(`${field} = ?`);
+      params.push(s[field]);
     }
-    console.log(`Configurações salvas/atualizadas para o usuário ${userId}`);
+  });
 
-    // Retorna os dados atualizados para confirmar
-    db.get(
-      "SELECT * FROM userSettings WHERE userId = ?",
-      [userId],
-      (errGet, row) => {
-        if (errGet || !row) {
-          return res
-            .status(500)
-            .json({ error: "Erro ao reler configurações após salvar." });
-        }
-        res.json({ success: true, settings: row });
-      }
-    );
+  if (updates.length === 0) return res.status(400).json({ error: "Nenhum dado para atualizar." });
+  params.push(userId);
+  const sql = `UPDATE userSettings SET ${updates.join(", ")} WHERE userId = ?`;
+
+  db.run(sql, params, function (err) {
+    if (err) return res.status(500).json({ error: "Erro ao atualizar configurações." });
+    db.get("SELECT * FROM userSettings WHERE userId = ?", [userId], (errGet, newSettings) => {
+      res.json({ success: true, settings: newSettings });
+    });
   });
 });
 
-// --- Point Record Routes (Protegidas) ---
+// --- ROTAS DO PLANNER (V3.1 - Batch & Holiday Flag) ---
 
-// (CORRIGIDO) Obter registro de ponto do dia (today) - AGORA USA TIMEZONE
-app.get("/api/point/today", authenticateToken, async (req, res) => {
+// Busca dados do mês
+app.get("/api/planner/:year/:month", authenticateToken, (req, res) => {
+  const { year, month } = req.params; // month 0-11
   const userId = req.user.userId;
+  const monthKey = `${year}-${String(parseInt(month) + 1).padStart(2, '0')}`;
+  const monthPrefix = `${monthKey}%`;
 
-  try {
-    const todayDate = await getTodayDateForUser(userId);
+  // (UPDATE V3.1) Seleciona também is_holiday e gig_hourly_rate
+  const sqlOverrides = "SELECT overrideId, date, day_type, is_holiday, notes, gig_hourly_rate FROM planner_overrides WHERE userId = ? AND date LIKE ?";
+  const sqlMonthConfig = "SELECT * FROM month_configs WHERE userId = ? AND month_key = ?";
 
-    // Query records with the correct date
-    const sql = "SELECT * FROM pointRecords WHERE userId = ? AND date = ?";
-    db.get(sql, [userId, todayDate], (err, row) => {
-      if (err) {
-        console.error("Erro DB (get /point/today):", err);
-        return res
-          .status(500)
-          .json({ error: "Erro ao buscar registro do dia." });
-      }
-
-      let record;
-      if (row) {
-        try {
-          record = {
-            ...row,
-            events: JSON.parse(row.events || "[]"),
-            aggregates: JSON.parse(row.aggregates || "{}"),
-            is_holiday: !!row.is_holiday,
-            is_finalized: !!row.is_finalized,
-          };
-        } catch (parseErr) {
-          record = { ...row, events: [], aggregates: {} };
-        }
-      } else {
-        record = {
-          recordId: null,
-          userId,
-          date: todayDate, // Retorna a data correta no fuso do usuário
-          events: [],
-          aggregates: {},
-          is_holiday: false,
-          is_finalized: false,
-        };
-      }
-      res.json(record);
+  db.all(sqlOverrides, [userId, monthPrefix], (err, overrides) => {
+    if (err) return res.status(500).json({ error: "Erro ao buscar overrides." });
+    
+    db.get(sqlMonthConfig, [userId, monthKey], (errM, config) => {
+      if (errM) return res.status(500).json({ error: "Erro ao buscar config do mês." });
+      
+      res.json({
+        overrides: overrides || [],
+        config: config || null
+      });
     });
-  } catch (error) {
-    console.error("Erro CRÍTICO em GET /api/point/today:", error);
-    res
-      .status(500)
-      .json({ error: "Erro interno ao buscar fuso horário do usuário." });
-  }
+  });
 });
 
-// (ATUALIZADO V42) Endpoint para resumo do mês (Total HE, Valor HE, Valor Total)
-app.get("/api/point/summary/month", authenticateToken, async (req, res) => {
+// Salva um override individual (Atualizado V3.1 para is_holiday)
+app.post("/api/planner/override", authenticateToken, (req, res) => {
   const userId = req.user.userId;
-  try {
-    const today = await getTodayDateForUser(userId);
-    const currentMonth = today.substring(0, 7); // Formato "YYYY-MM"
+  const { date, day_type, notes, is_holiday, gig_hourly_rate } = req.body;
 
+  if (!date || !day_type) return res.status(400).json({ error: "Data e Tipo são obrigatórios." });
+
+  const holidayVal = is_holiday ? 1 : 0;
+  const gigRateVal = gig_hourly_rate || 0;
+
+  const sql = `
+    INSERT INTO planner_overrides (userId, date, day_type, is_holiday, notes, gig_hourly_rate, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(userId, date) DO UPDATE SET
+      day_type = excluded.day_type,
+      is_holiday = excluded.is_holiday,
+      notes = excluded.notes,
+      gig_hourly_rate = excluded.gig_hourly_rate,
+      created_at = CURRENT_TIMESTAMP
+  `;
+
+  db.run(sql, [userId, date, day_type, holidayVal, notes, gigRateVal], function (err) {
+    if (err) return res.status(500).json({ error: "Erro ao salvar override." });
+    res.json({ success: true });
+  });
+});
+
+// (NOVO V3.1) Salva múltiplos overrides (Batch Mode)
+app.post("/api/planner/batch", authenticateToken, (req, res) => {
+  const userId = req.user.userId;
+  const { dates, day_type, is_holiday, gig_hourly_rate } = req.body;
+
+  if (!dates || !Array.isArray(dates) || dates.length === 0) {
+    return res.status(400).json({ error: "Lista de datas inválida." });
+  }
+  if (!day_type) return res.status(400).json({ error: "Tipo de dia obrigatório." });
+
+  const holidayVal = is_holiday ? 1 : 0;
+  const gigRateVal = gig_hourly_rate || 0;
+
+  // Executa em série (SQLite lida bem com isso, melhor que Promise.all paralelo para evitar travamento de arquivo)
+  db.serialize(() => {
+    db.run("BEGIN TRANSACTION");
+    
+    const stmt = db.prepare(`
+      INSERT INTO planner_overrides (userId, date, day_type, is_holiday, gig_hourly_rate, created_at)
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(userId, date) DO UPDATE SET
+        day_type = excluded.day_type,
+        is_holiday = excluded.is_holiday,
+        gig_hourly_rate = excluded.gig_hourly_rate,
+        created_at = CURRENT_TIMESTAMP
+    `);
+
+    for (const date of dates) {
+      stmt.run(userId, date, day_type, holidayVal, gigRateVal);
+    }
+
+    stmt.finalize();
+    
+    db.run("COMMIT", (err) => {
+      if (err) {
+        console.error("Erro Batch Commit:", err);
+        return res.status(500).json({ error: "Erro ao salvar lote." });
+      }
+      res.json({ success: true, count: dates.length });
+    });
+  });
+});
+
+app.post("/api/planner/config", authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    const { year, month, planned_work_days, base_hourly_rate } = req.body;
+    const monthKey = `${year}-${String(parseInt(month)+1).padStart(2,'0')}`;
+  
     const sql = `
-        SELECT aggregates 
-        FROM pointRecords 
-        WHERE userId = ? AND strftime('%Y-%m', date) = ? AND is_finalized = 1
+      INSERT INTO month_configs (userId, month_key, planned_work_days, base_hourly_rate, created_at)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(userId, month_key) DO UPDATE SET
+        planned_work_days = excluded.planned_work_days,
+        base_hourly_rate = excluded.base_hourly_rate,
+        created_at = CURRENT_TIMESTAMP
     `;
+  
+    db.run(sql, [userId, monthKey, planned_work_days, base_hourly_rate], function(err) {
+      if (err) return res.status(500).json({ error: "Erro ao salvar config do mês." });
+      res.json({ success: true });
+    });
+});
 
-    db.all(sql, [userId, currentMonth], (err, rows) => {
-      if (err) {
-        console.error("Erro DB (get /point/summary/month):", err);
-        return res.status(500).json({ error: "Erro ao buscar resumo do mês." });
+// --- ROTAS DO AUDITOR (V3.1 Update) ---
+
+app.get("/api/auditor/pending", authenticateToken, (req, res) => {
+  const userId = req.user.userId;
+  const todayStr = new Date().toISOString().split("T")[0];
+
+  const sqlSettings = "SELECT * FROM userSettings WHERE userId = ?";
+  // (UPDATE) Busca overrides atualizados
+  const sqlOverrides = "SELECT * FROM planner_overrides WHERE userId = ? AND date >= ? AND date < ?";
+  const sqlRecords = "SELECT date, justification FROM pointRecords WHERE userId = ? AND date >= ? AND date < ?";
+
+  db.get(sqlSettings, [userId], (errS, settings) => {
+    if (errS || !settings) return res.status(500).json({ error: "Erro configs." });
+
+    db.all(sqlOverrides, [userId, START_DATE_AUDIT, todayStr], (errO, overrides) => {
+      if (errO) return res.status(500).json({ error: "Erro overrides." });
+
+      db.all(sqlRecords, [userId, START_DATE_AUDIT, todayStr], (errR, records) => {
+        if (errR) return res.status(500).json({ error: "Erro records." });
+
+        const pendingDates = calculatePendingDates(settings, overrides, records, START_DATE_AUDIT, todayStr);
+        res.json({ pending: pendingDates });
+      });
+    });
+  });
+});
+
+app.post("/api/auditor/resolve", authenticateToken, (req, res) => {
+  const userId = req.user.userId;
+  const { date, justification } = req.body; 
+
+  if (!date || !justification) return res.status(400).json({ error: "Dados incompletos." });
+
+  db.get("SELECT * FROM userSettings WHERE userId = ?", [userId], (errS, settings) => {
+     if(errS) return res.status(500).json({error: "Erro settings"});
+
+     const mockRecordData = { justification }; 
+     const calcs = calculateDailyTotals([], settings, date, null, null, mockRecordData);
+     const aggsStr = JSON.stringify(calcs);
+
+     const sql = `
+        INSERT INTO pointRecords (userId, date, events, aggregates, justification, is_finalized)
+        VALUES (?, ?, '[]', ?, ?, 1)
+        ON CONFLICT(userId, date) DO UPDATE SET
+            justification = excluded.justification,
+            aggregates = excluded.aggregates,
+            is_finalized = 1
+     `;
+
+     db.run(sql, [userId, date, aggsStr, justification], function(err) {
+        if (err) return res.status(500).json({ error: "Erro ao justificar." });
+        res.json({ success: true, date, justification, aggregates: calcs });
+     });
+  });
+});
+
+// --- Rotas de Ponto ---
+
+app.post("/api/point", authenticateToken, (req, res) => {
+  const userId = req.user.userId;
+  const { type, time, date, is_manual, isEdit, originalTime, is_gig, gig_hourly_rate } = req.body;
+
+  if (!type || !time) return res.status(400).json({ error: "Tipo e Hora são obrigatórios." });
+
+  const recordDate = date || new Date().toISOString().split("T")[0];
+  const monthKey = recordDate.substring(0, 7);
+
+  db.get("SELECT * FROM pointRecords WHERE userId = ? AND date = ?", [userId, recordDate], (err, record) => {
+      if (err) return res.status(500).json({ error: "Erro DB Point" });
+
+      let events = [];
+      let currentJustification = null;
+      let currentIsGig = is_gig !== undefined ? (is_gig ? 1 : 0) : 0;
+      let currentGigRate = gig_hourly_rate !== undefined ? gig_hourly_rate : 0;
+
+      if (record) {
+        if(is_gig === undefined) currentIsGig = record.is_gig;
+        if(gig_hourly_rate === undefined) currentGigRate = record.gig_hourly_rate;
+        currentJustification = record.justification; 
+        
+        if (type !== 'justification') currentJustification = null;
+
+        if (record.is_finalized && !isEdit) return res.status(400).json({ error: "Dia já finalizado." });
+        events = JSON.parse(record.events || "[]");
       }
 
-      let total_extra_minutes = 0;
-      let total_farm = 0;
-      let total_farm_extra = 0; // (NOVO V38)
-
-      rows.forEach((row) => {
-        try {
-          const aggregates = JSON.parse(row.aggregates || "{}");
-
-          // (CORREÇÃO V38) Soma HE normal + HE estourada
-          total_extra_minutes +=
-            (aggregates.extra_minutes || 0) +
-            (aggregates.estourado_minutes || 0);
-
-          // (V42) Soma o valor total do dia
-          total_farm +=
-            (aggregates.farm_jornada_value || 0) +
-            (aggregates.farm_he_value || 0) +
-            (aggregates.farm_estourado_value || 0) +
-            (aggregates.farm_adicional_noturno_value || 0) +
-            (aggregates.farm_adicional_feriado_value || 0);
-
-          // (V42) Soma apenas o valor da HE (normal + estourada)
-          total_farm_extra +=
-            (aggregates.farm_he_value || 0) +
-            (aggregates.farm_estourado_value || 0);
-        } catch (e) {
-          console.warn("Erro ao parsear aggregates no resumo do mês:", e);
+      if (isEdit) {
+        if (originalTime) {
+          const idx = events.findIndex((e) => e.type === type && e.time === originalTime);
+          if (idx !== -1) events[idx] = { type, time, is_manual: true };
+        } else {
+          const idx = events.findIndex((e) => e.type === type);
+          if (idx !== -1) events[idx] = { type, time, is_manual: true };
+          else events.push({ type, time, is_manual: true });
         }
-      });
-
-      res.json({
-        total_extra_minutes: Math.round(total_extra_minutes),
-        total_farm: parseFloat(total_farm.toFixed(2)),
-        total_farm_extra: parseFloat(total_farm_extra.toFixed(2)), // (NOVO V38)
-      });
-    });
-  } catch (error) {
-    console.error("Erro CRÍTICO em GET /api/point/summary/month:", error);
-    res.status(500).json({ error: "Erro interno ao processar resumo." });
-  }
-});
-
-// (MODELO RH) Recalcular aggregates de todos os registros de um mês com as settings atuais
-app.post("/api/point/recalculate-month", authenticateToken, async (req, res) => {
-  const userId = req.user.userId;
-  try {
-    const today = await getTodayDateForUser(userId);
-    const yearMonth = req.body.yearMonth || today.substring(0, 7);
-
-    // Busca as settings atuais do usuário
-    const settings = await new Promise((resolve, reject) => {
-      db.get("SELECT * FROM userSettings WHERE userId = ?", [userId], (err, row) => {
-        if (err) reject(err);
-        else resolve(row || {});
-      });
-    });
-
-    // Busca todos os registros do mês
-    const records = await new Promise((resolve, reject) => {
-      db.all(
-        `SELECT * FROM pointRecords WHERE userId = ? AND strftime('%Y-%m', date) = ?`,
-        [userId, yearMonth],
-        (err, rows) => { if (err) reject(err); else resolve(rows || []); }
-      );
-    });
-
-    let recalculatedCount = 0;
-    for (const row of records) {
-      try {
-        const events = JSON.parse(row.events || "[]");
-        if (!events || events.length === 0) continue;
-
-        const dateObj = new Date(row.date + "T00:00:00Z");
-        const dow = dateObj.getUTCDay();
-        const isSunday = dow === 0;
-        const is_holiday = !!row.is_holiday;
-
-        const newAggregates = calculateBackendMetrics(events, settings, is_holiday, isSunday);
-
-        await new Promise((resolve, reject) => {
-          db.run(
-            "UPDATE pointRecords SET aggregates = ? WHERE recordId = ?",
-            [JSON.stringify(newAggregates), row.recordId],
-            (err) => { if (err) reject(err); else resolve(); }
-          );
-        });
-        recalculatedCount++;
-      } catch (e) {
-        console.warn(`Erro ao recalcular record ${row.recordId}:`, e.message);
-      }
-    }
-
-    console.log(`Recalculados ${recalculatedCount} registros para userId=${userId}, mês=${yearMonth}`);
-    res.json({ success: true, recalculatedCount, yearMonth });
-  } catch (error) {
-    console.error("Erro CRÍTICO em POST /api/point/recalculate-month:", error);
-    res.status(500).json({ error: "Erro interno ao recalcular o mês." });
-  }
-});
-
-// (CORRIGIDO) Adicionar/Editar Ponto (Evento) - AGORA USA TIMEZONE
-app.post("/api/point", authenticateToken, async (req, res) => {
-  const userId = req.user.userId;
-  const { type, time, is_manual, isEdit, originalTime } = req.body;
-
-  if (!type || !time) {
-    return res.status(400).json({ error: "Tipo e Hora são obrigatórios." });
-  }
-
-  try {
-    const settingsSql = "SELECT * FROM userSettings WHERE userId = ?";
-    const settings = await new Promise((resolve, reject) => {
-      db.get(settingsSql, [userId], (err, row) =>
-        err ? reject(err) : resolve(row || {})
-      );
-    });
-
-    const date = await getTodayDateForUser(userId);
-
-    const todayObj = new Date(date + "T00:00:00Z");
-    const isSunday = todayObj.getUTCDay() === 0;
-
-    const recordSql =
-      "SELECT * FROM pointRecords WHERE userId = ? AND date = ?";
-    const row = await new Promise((resolve, reject) => {
-      db.get(recordSql, [userId, date], (err, row) =>
-        err ? reject(err) : resolve(row)
-      );
-    });
-
-    let currentEvents = [];
-    let recordId = row ? row.recordId : null;
-    let isHoliday = row ? !!row.is_holiday : false;
-    let isFinalized = row ? !!row.is_finalized : false;
-
-    // (NOVO V30) Impede edição se o dia estiver finalizado
-    if (isFinalized) {
-      return res
-        .status(403)
-        .json({ error: "O dia já foi finalizado e não pode ser alterado." });
-    }
-
-    if (row && row.events) {
-      try {
-        currentEvents = JSON.parse(row.events);
-      } catch {
-        currentEvents = [];
-      }
-    }
-
-    let updatedEvents = [...currentEvents];
-
-    if (isEdit) {
-      const index = updatedEvents.findIndex(
-        (e) => e.type === type && e.time === originalTime
-      );
-      if (index > -1) {
-        updatedEvents[index].time = time;
-        updatedEvents[index].is_manual = true;
       } else {
-        // Se não achou o original, apenas adiciona (previne erro)
-        updatedEvents.push({ type, time, is_manual: true });
+        events.push({ type, time, is_manual: !!is_manual });
       }
-    } else {
-      updatedEvents = updatedEvents.filter((e) => e.type !== type);
-      updatedEvents.push({ type, time, is_manual: !!is_manual });
-    }
+      events.sort((a, b) => a.time.localeCompare(b.time));
 
-    updatedEvents.sort((a, b) => timeToMinutes(a.time) - timeToMinutes(b.time));
+      db.get("SELECT * FROM userSettings WHERE userId = ?", [userId], (errS, settings) => {
+        if(errS) return res.status(500).json({error: "Erro settings"});
+        
+        db.get("SELECT * FROM month_configs WHERE userId = ? AND month_key = ?", [userId, monthKey], (errM, monthConfig) => {
+           
+            // (UPDATE V3.1) Busca override com is_holiday
+            db.get("SELECT day_type, is_holiday, gig_hourly_rate FROM planner_overrides WHERE userId = ? AND date = ?", [userId, recordDate], (errO, override) => {
+                
+                // Se o override tiver taxa de gig especifica, usa ela, senão usa a do record ou a do parametro
+                if (override && override.day_type === 'GIG' && override.gig_hourly_rate > 0) {
+                    currentGigRate = override.gig_hourly_rate;
+                }
 
-    const newAggregates = calculateBackendMetrics(
-      updatedEvents,
-      settings,
-      isHoliday,
-      isSunday
-    );
+                const recordData = {
+                    is_gig: currentIsGig,
+                    gig_hourly_rate: currentGigRate,
+                    justification: currentJustification
+                };
 
-    const eventsJson = JSON.stringify(updatedEvents);
-    const aggregatesJson = JSON.stringify(newAggregates);
+                const calcs = calculateDailyTotals(events, settings, recordDate, override, monthConfig, recordData);
+                const eventsStr = JSON.stringify(events);
+                const aggsStr = JSON.stringify(calcs);
 
-    const sqlReplace = `
-        INSERT OR REPLACE INTO pointRecords 
-        (recordId, userId, date, events, aggregates, is_holiday, is_finalized)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    `;
+                const sqlUpsert = `
+                    INSERT INTO pointRecords (userId, date, events, aggregates, is_gig, gig_hourly_rate, justification, is_finalized, is_holiday)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)
+                    ON CONFLICT(userId, date) DO UPDATE SET
+                        events = excluded.events,
+                        aggregates = excluded.aggregates,
+                        is_gig = excluded.is_gig,
+                        gig_hourly_rate = excluded.gig_hourly_rate,
+                        justification = excluded.justification,
+                        updated_at = CURRENT_TIMESTAMP
+                `;
 
-    await new Promise((resolve, reject) => {
-      db.run(
-        sqlReplace,
-        [
-          recordId,
-          userId,
-          date, // Data correta
-          eventsJson,
-          aggregatesJson,
-          isHoliday ? 1 : 0,
-          isFinalized ? 1 : 0,
-        ],
-        function (err) {
-          if (err) {
-            console.error("ERRO AO SALVAR PONTO:", err);
-            reject(err);
-          } else {
-            if (!recordId) recordId = this.lastID;
-            console.log(`Ponto salvo com sucesso para ${userId} em ${date}`);
-            resolve(this);
-          }
-        }
-      );
-    });
-
-    const updatedRecord = {
-      recordId,
-      userId,
-      date,
-      events: updatedEvents,
-      aggregates: newAggregates,
-      is_holiday: isHoliday,
-      is_finalized: isFinalized,
-    };
-    res.status(isEdit ? 200 : 201).json(updatedRecord);
-  } catch (error) {
-    console.error("Erro CRÍTICO em POST /api/point:", error);
-    res
-      .status(500)
-      .json({ error: "Erro interno ao processar o registro de ponto." });
-  }
+                db.run(sqlUpsert, [userId, recordDate, eventsStr, aggsStr, currentIsGig, currentGigRate, currentJustification], function(errUp) {
+                    if (errUp) return res.status(500).json({ error: "Erro ao salvar ponto." });
+                    res.json({
+                        success: true,
+                        date: recordDate,
+                        events,
+                        aggregates: calcs,
+                        is_gig: !!currentIsGig,
+                        is_finalized: record ? record.is_finalized : 0
+                    });
+                });
+            });
+        });
+      });
+  });
 });
 
-// (CORRIGIDO) Endpoint para marcar/desmarcar feriado - AGORA USA TIMEZONE
-app.put("/api/point/holiday", authenticateToken, async (req, res) => {
+app.get("/api/point/today", authenticateToken, (req, res) => {
   const userId = req.user.userId;
-  const { is_holiday } = req.body;
+  let date = req.query.date;
+  if (!date) date = new Date().toISOString().split("T")[0];
 
-  if (typeof is_holiday !== "boolean") {
-    return res
-      .status(400)
-      .json({ error: "Valor 'is_holiday' (booleano) é obrigatório." });
-  }
-
-  try {
-    const settingsSql = "SELECT * FROM userSettings WHERE userId = ?";
-    const settings = await new Promise((resolve, reject) => {
-      db.get(settingsSql, [userId], (err, settingsRow) =>
-        err ? reject(err) : resolve(settingsRow || {})
-      );
-    });
-
-    const date = await getTodayDateForUser(userId);
-
-    const todayObj = new Date(date + "T00:00:00Z");
-    const isSunday = todayObj.getUTCDay() === 0;
-
-    const recordSql =
-      "SELECT * FROM pointRecords WHERE userId = ? AND date = ?";
-    let row = await new Promise((resolve, reject) => {
-      db.get(recordSql, [userId, date], (err, row) =>
-        err ? reject(err) : resolve(row)
-      );
-    });
-
-    if (!row) {
-      console.log(
-        `Nenhum registro para ${date}, criando um novo para marcar feriado.`
-      );
-      row = {
-        recordId: null,
-        userId,
-        date: date, // Data correta
-        events: "[]",
-        aggregates: "{}",
-        is_holiday: 0,
-        is_finalized: 0,
-      };
-    }
-
-    // (NOVO V30) Impede edição se o dia estiver finalizado
-    if (row.is_finalized) {
-      // (CORREÇÃO V34) Se o dia está finalizado, apenas retorna o registro atual sem erro
-      console.warn(`Tentativa de alterar feriado em dia finalizado: ${date}`);
-      try {
-        row.events = JSON.parse(row.events || "[]");
-        row.aggregates = JSON.parse(row.aggregates || "{}");
-      } catch (e) {
-        row.events = [];
-        row.aggregates = {};
-      }
-      row.is_holiday = !!row.is_holiday;
-      row.is_finalized = !!row.is_finalized;
-      return res.json(row);
-    }
-
-    const currentEvents = JSON.parse(row.events || "[]");
-    const newAggregates = calculateBackendMetrics(
-      currentEvents,
-      settings,
-      is_holiday, // <--- Usa o NOVO valor de feriado
-      isSunday
-    );
-    const aggregatesJson = JSON.stringify(newAggregates);
-
-    const sqlReplace = `
-          INSERT OR REPLACE INTO pointRecords 
-          (recordId, userId, date, events, aggregates, is_holiday, is_finalized)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-      `;
-
-    let recordId = row.recordId;
-    await new Promise((resolve, reject) => {
-      db.run(
-        sqlReplace,
-        [
-          recordId,
-          userId,
-          date, // Data correta
-          row.events, // Mantém os eventos atuais
-          aggregatesJson, // Salva os novos agregados
-          is_holiday ? 1 : 0, // Salva o novo status de feriado
-          row.is_finalized, // Mantém o status de finalizado
-        ],
-        function (err) {
-          if (err) {
-            console.error("ERRO AO SALVAR FERIADO:", err);
-            reject(err);
-          } else {
-            if (!recordId) recordId = this.lastID;
-            console.log(`Feriado atualizado para ${userId} em ${date}`);
-            resolve(this);
-          }
-        }
-      );
-    });
-
-    const updatedRecord = {
-      recordId,
-      userId,
-      date,
-      events: currentEvents,
-      aggregates: newAggregates,
-      is_holiday: is_holiday,
-      is_finalized: !!row.is_finalized,
-    };
-    res.json(updatedRecord);
-  } catch (error) {
-    console.error("Erro CRÍTICO em PUT /api/point/holiday:", error);
-    res.status(500).json({ error: "Erro interno ao atualizar feriado." });
-  }
-});
-
-// (REMOVIDO V34) Endpoint /recalculate não é mais necessário
-// app.put("/api/point/recalculate", ...);
-
-// (NOVO V30) Endpoint para FINALIZAR o dia
-app.put("/api/point/finalize", authenticateToken, async (req, res) => {
-  const userId = req.user.userId;
-  try {
-    const date = await getTodayDateForUser(userId);
-    const sql =
-      "UPDATE pointRecords SET is_finalized = 1 WHERE userId = ? AND date = ? AND is_finalized = 0";
-
-    db.run(sql, [userId, date], function (err) {
-      if (err) {
-        console.error("Erro DB (finalize):", err);
-        return res.status(500).json({ error: "Erro ao finalizar o dia." });
-      }
-      if (this.changes === 0) {
-        return res
-          .status(400)
-          .json({ error: "O dia já estava finalizado ou não existe." });
-      }
-      console.log(`Dia ${date} FINALIZADO para usuário ${userId}`);
-      res.json({ success: true, message: "Dia finalizado com sucesso." });
-    });
-  } catch (error) {
-    console.error("Erro CRÍTICO em PUT /api/point/finalize:", error);
-    res.status(500).json({ error: "Erro interno ao processar requisição." });
-  }
-});
-
-// (NOVO V30) Endpoint para "des-finalizar" o dia
-app.put("/api/point/unfinalize", authenticateToken, async (req, res) => {
-  const userId = req.user.userId;
-  try {
-    const date = await getTodayDateForUser(userId);
-    const sql =
-      "UPDATE pointRecords SET is_finalized = 0 WHERE userId = ? AND date = ? AND is_finalized = 1";
-
-    db.run(sql, [userId, date], function (err) {
-      if (err) {
-        console.error("Erro DB (unfinalize):", err);
-        return res.status(500).json({ error: "Erro ao reabrir o dia." });
-      }
-      if (this.changes === 0) {
-        return res.status(400).json({ error: "O dia não estava finalizado." });
-      }
-      console.log(`Dia ${date} reaberto para usuário ${userId}`);
-      res.json({ success: true, message: "Dia reaberto para edição." });
-    });
-  } catch (error) {
-    console.error("Erro CRÍTICO em PUT /api/point/unfinalize:", error);
-    res.status(500).json({ error: "Erro interno ao processar requisição." });
-  }
-});
-
-// (NOVO V30) Endpoint para "limpar" os eventos do dia
-app.delete("/api/point/clear", authenticateToken, async (req, res) => {
-  const userId = req.user.userId;
-  try {
-    const date = await getTodayDateForUser(userId);
-
-    // Pega settings para recalcular o estado vazio
-    const settingsSql = "SELECT * FROM userSettings WHERE userId = ?";
-    const settings = await new Promise((resolve, reject) => {
-      db.get(settingsSql, [userId], (err, row) =>
-        err ? reject(err) : resolve(row || {})
-      );
-    });
-
-    // (NOVO V30) Precisamos saber se era feriado/domingo antes de limpar
-    const recordSql =
-      "SELECT is_holiday FROM pointRecords WHERE userId = ? AND date = ?";
-    const record = await new Promise((resolve, reject) => {
-      db.get(recordSql, [userId, date], (err, row) =>
-        err ? reject(err) : resolve(row || { is_holiday: 0 })
-      );
-    });
-    const todayObj = new Date(date + "T00:00:00Z");
-    const isSunday = todayObj.getUTCDay() === 0;
-
-    // Calcula agregados vazios
-    const newAggregates = calculateBackendMetrics(
-      [],
-      settings,
-      record.is_holiday,
-      isSunday
-    );
-    const aggregatesJson = JSON.stringify(newAggregates);
-
-    const sql =
-      "UPDATE pointRecords SET events = '[]', aggregates = ?, is_finalized = 0 WHERE userId = ? AND date = ?";
-
-    db.run(sql, [aggregatesJson, userId, date], function (err) {
-      if (err) {
-        console.error("Erro DB (clear):", err);
-        return res.status(500).json({ error: "Erro ao limpar registros." });
-      }
-      console.log(`Registros limpos para ${userId} em ${date}`);
-
-      // Retorna o registro "zerado"
-      res.json({
-        userId,
+  db.get("SELECT * FROM pointRecords WHERE userId = ? AND date = ?", [userId, date], (err, record) => {
+    if (err) return res.status(500).json({ error: "Erro DB" });
+    if (!record) {
+      return res.json({
         date,
         events: [],
-        aggregates: newAggregates,
-        is_holiday: record.is_holiday, // Mantém o status de feriado
+        aggregates: {},
+        is_gig: false,
+        justification: null,
         is_finalized: false,
       });
+    }
+    res.json({
+      date: record.date,
+      events: JSON.parse(record.events),
+      aggregates: JSON.parse(record.aggregates),
+      is_gig: !!record.is_gig,
+      justification: record.justification,
+      is_finalized: !!record.is_finalized,
     });
-  } catch (error) {
-    console.error("Erro CRÍTICO em DELETE /api/point/clear:", error);
-    res.status(500).json({ error: "Erro interno ao processar requisição." });
-  }
+  });
 });
 
-
-// =====================================================================
-// NOVOS ENDPOINTS — TELA MÊS
-// Projetados para futura migração Firebase (funções puras, registros atômicos).
-// =====================================================================
-
-// GET /api/point/month?month=YYYY-MM — Todos os registros do mês
-app.get("/api/point/month", authenticateToken, async (req, res) => {
+app.put("/api/point/finalize", authenticateToken, (req, res) => {
   const userId = req.user.userId;
-  const { month } = req.query;
-  if (!month || !/^\d{4}-\d{2}$/.test(month)) {
-    return res.status(400).json({ error: "Parâmetro 'month' inválido. Use YYYY-MM." });
-  }
-  try {
-    const sql = `SELECT recordId, userId, date, events, aggregates, is_holiday, is_folga, is_domingo_trabalhado, is_finalized FROM pointRecords WHERE userId = ? AND strftime('%Y-%m', date) = ? ORDER BY date ASC`;
-    db.all(sql, [userId, month], (err, rows) => {
-      if (err) { console.error("Erro DB (get /point/month):", err); return res.status(500).json({ error: "Erro ao buscar registros do mês." }); }
-      const records = rows.map(row => {
-        try { 
-          return { 
-            ...row, 
-            events: JSON.parse(row.events || "[]"), 
-            aggregates: JSON.parse(row.aggregates || "{}"), 
-            is_holiday: !!row.is_holiday, 
-            is_finalized: !!row.is_finalized,
-            is_folga: !!row.is_folga // Força conversão de INT pra Boolean
-          }; 
+  const date = req.body.date || new Date().toISOString().split("T")[0];
+  db.run("UPDATE pointRecords SET is_finalized = 1 WHERE userId = ? AND date = ?", [userId, date], function(err){
+      if(err) return res.status(500).json({error: "Erro finalize"});
+      res.json({success: true});
+  });
+});
+
+app.put("/api/point/unfinalize", authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    const date = req.body.date || new Date().toISOString().split("T")[0];
+    db.run("UPDATE pointRecords SET is_finalized = 0 WHERE userId = ? AND date = ?", [userId, date], function(err){
+        if(err) return res.status(500).json({error: "Erro unfinalize"});
+        res.json({success: true});
+    });
+});
+
+app.delete("/api/point/clear", authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    const date = req.body.date || new Date().toISOString().split("T")[0];
+    db.run("DELETE FROM pointRecords WHERE userId = ? AND date = ?", [userId, date], function(err){
+        if(err) return res.status(500).json({error: "Erro clear"});
+        res.json({success: true, date, events:[], aggregates:{}});
+    });
+});
+
+app.get("/api/point/summary/month", authenticateToken, (req, res) => {
+    const userId = req.user.userId;
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const monthPrefix = `${year}-${month}%`;
+  
+    const sql = `
+          SELECT 
+              SUM(json_extract(aggregates, '$.farm_he_value')) as total_he,
+              SUM(json_extract(aggregates, '$.farm_estourado_value')) as total_estourado,
+              SUM(json_extract(aggregates, '$.farm_gig_value')) as total_gig,
+              SUM(json_extract(aggregates, '$.deduction_value')) as total_deduction,
+              SUM(json_extract(aggregates, '$.extra_minutes')) as total_extra_min
+          FROM pointRecords 
+          WHERE userId = ? AND date LIKE ? AND is_finalized = 1
+      `;
+  
+    db.get(sql, [userId, monthPrefix], (err, row) => {
+      if (err) return res.status(500).json({ error: "Erro Summary" });
+      const totalHE = (row.total_he || 0) + (row.total_estourado || 0);
+      const totalGig = row.total_gig || 0;
+      const totalDeduction = row.total_deduction || 0;
+      
+      const totalFarmExtra = (totalHE + totalGig) - totalDeduction;
+
+      res.json({
+        total_farm_extra: totalFarmExtra,
+        total_extra_minutes: row.total_extra_min || 0,
+        breakdown: {
+            he: totalHE,
+            gig: totalGig,
+            deduction: totalDeduction
         }
-        catch { return { ...row, events: [], aggregates: {}, is_holiday: false, is_domingo_trabalhado: false, is_finalized: false, is_folga: false }; }
       });
-      res.json({ month, records });
     });
-  } catch (error) { console.error("Erro CRÍTICO em GET /api/point/month:", error); res.status(500).json({ error: "Erro interno ao buscar mês." }); }
 });
 
-// PUT /api/point/:date/holiday — Marca/desmarca feriado em qualquer data (retroativo)
-app.put("/api/point/:date/holiday", authenticateToken, async (req, res) => {
-  const userId = req.user.userId;
-  const { date } = req.params;
-  const { is_holiday } = req.body;
-  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "Data inválida. Use YYYY-MM-DD." });
-  if (typeof is_holiday !== "boolean") return res.status(400).json({ error: "Valor 'is_holiday' (booleano) é obrigatório." });
-  try {
-    const settings = await new Promise((resolve, reject) => db.get("SELECT * FROM userSettings WHERE userId = ?", [userId], (err, row) => err ? reject(err) : resolve(row || {})));
-    const dateObj = new Date(date + "T00:00:00Z");
-    const isSunday = dateObj.getUTCDay() === 0;
-    let row = await new Promise((resolve, reject) => db.get("SELECT * FROM pointRecords WHERE userId = ? AND date = ?", [userId, date], (err, row) => err ? reject(err) : resolve(row)));
-    if (!row) row = { recordId: null, userId, date, events: "[]", aggregates: "{}", is_holiday: 0, is_folga: 0, is_domingo_trabalhado: 0, is_finalized: 0 };
-    const currentEvents = JSON.parse(row.events || "[]");
-    const newAggregates = calculateBackendMetrics(currentEvents, settings, is_holiday, isSunday);
-    let recordId = row.recordId;
-    const currentIsFolga = typeof is_folga === "boolean" ? is_folga : (row ? !!row.is_folga : false);
-    const currentIsDomingoTrabalhado = typeof is_domingo_trabalhado === "boolean" ? is_domingo_trabalhado : (row ? !!row.is_domingo_trabalhado : false);
-    await new Promise((resolve, reject) => db.run(`INSERT OR REPLACE INTO pointRecords (recordId, userId, date, events, aggregates, is_holiday, is_folga, is_domingo_trabalhado, is_finalized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [recordId, userId, date, row.events, JSON.stringify(newAggregates), is_holiday ? 1 : 0, row.is_folga ? 1 : 0, row.is_domingo_trabalhado ? 1 : 0, row.is_finalized ? 1 : 0], function(err) { if (err) reject(err); else { if (!recordId) recordId = this.lastID; resolve(this); } }));
-    console.log(`Feriado retroativo: ${date} userId=${userId} is_holiday=${is_holiday}`);
-    res.json({ recordId, userId, date, events: currentEvents, aggregates: newAggregates, is_holiday, is_finalized: !!row.is_finalized });
-  } catch (error) { console.error("Erro CRÍTICO em PUT /api/point/:date/holiday:", error); res.status(500).json({ error: "Erro interno ao atualizar feriado." }); }
-});
-
-// PUT /api/point/:date/events — Edita eventos de qualquer dia (retroativo)
-app.put("/api/point/:date/events", authenticateToken, async (req, res) => {
-  const userId = req.user.userId;
-  const { date } = req.params;
-  const { events, is_holiday, is_folga, is_domingo_trabalhado, is_finalized } = req.body;
-  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: "Data inválida. Use YYYY-MM-DD." });
-  if (!Array.isArray(events)) return res.status(400).json({ error: "'events' deve ser um array." });
-  try {
-    const settings = await new Promise((resolve, reject) => db.get("SELECT * FROM userSettings WHERE userId = ?", [userId], (err, row) => err ? reject(err) : resolve(row || {})));
-    const dateObj = new Date(date + "T00:00:00Z");
-    const isSunday = dateObj.getUTCDay() === 0;
-    const row = await new Promise((resolve, reject) => db.get("SELECT * FROM pointRecords WHERE userId = ? AND date = ?", [userId, date], (err, row) => err ? reject(err) : resolve(row)));
-    const currentIsHoliday = typeof is_holiday === "boolean" ? is_holiday : (row ? !!row.is_holiday : false);
-    const currentIsFinalized = typeof is_finalized === "boolean" ? is_finalized : (row ? !!row.is_finalized : false);
-    const sortedEvents = [...events].sort((a, b) => { const ta = (a.time||"").split(":"); const tb = (b.time||"").split(":"); return (parseInt(ta[0])*60+parseInt(ta[1]||0)) - (parseInt(tb[0])*60+parseInt(tb[1]||0)); });
-    const newAggregates = calculateBackendMetrics(sortedEvents, settings, currentIsHoliday, isSunday);
-    let recordId = row ? row.recordId : null;
-    const currentIsFolga = typeof is_folga === "boolean" ? is_folga : (row ? !!row.is_folga : false);
-    await new Promise((resolve, reject) => db.run(`INSERT OR REPLACE INTO pointRecords (recordId, userId, date, events, aggregates, is_holiday, is_folga, is_domingo_trabalhado, is_finalized) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [recordId, userId, date, JSON.stringify(sortedEvents), JSON.stringify(newAggregates), currentIsHoliday ? 1 : 0, currentIsFolga ? 1 : 0, currentIsDomingoTrabalhado ? 1 : 0, currentIsFinalized ? 1 : 0], function(err) { if (err) reject(err); else { if (!recordId) recordId = this.lastID; resolve(this); } }));
-    console.log(`Eventos retroativos: ${date} userId=${userId}`);
-    res.json({ recordId, userId, date, events: sortedEvents, aggregates: newAggregates, is_holiday: currentIsHoliday, is_folga: currentIsFolga, is_domingo_trabalhado: currentIsDomingoTrabalhado, is_finalized: currentIsFinalized });
-  } catch (error) { console.error("Erro CRÍTICO em PUT /api/point/:date/events:", error); res.status(500).json({ error: "Erro interno ao salvar eventos." }); }
-});
-// --- Admin Routes (Protegidas por JWT + isAdmin) ---
+// --- Rotas Admin ---
 app.get("/api/admin/users", authenticateToken, isAdmin, (req, res) => {
-  const sql =
-    "SELECT userId, name, login, email, role, is_first_login, created_at FROM users ORDER BY name";
-  db.all(sql, [], (err, rows) => {
-    if (err) {
-      console.error("Erro DB (get /admin/users):", err);
-      return res.status(500).json({ error: "Erro ao listar usuários." });
-    }
-    res.json(rows);
-  });
+    db.all("SELECT userId, name, login, email, role, is_first_login FROM users", [], (err, rows) => {
+        if(err) return res.status(500).json({error: "Erro DB"});
+        res.json(rows);
+    });
 });
-
-// (ATUALIZADO V29) Admin pode criar usuário com 'login' (obrigatório) e 'email' (opcional)
 app.post("/api/admin/users", authenticateToken, isAdmin, (req, res) => {
-  const { name, login, email, role } = req.body;
-  if (!name || !login || !role || !["user", "admin"].includes(role)) {
-    return res.status(400).json({
-      error: "Nome, login e role (user/admin) são obrigatórios.",
+    const { name, login, email, role } = req.body;
+    bcrypt.hash("dummy", SALT_ROUNDS, (errHash, hash) => {
+        if(errHash) return res.status(500).json({error: "Erro hash"});
+        const sql = "INSERT INTO users (name, login, email, password_hash, role, is_first_login) VALUES (?, ?, ?, ?, ?, 1)";
+        db.run(sql, [name, login, email, hash, role||'user'], function(err){
+            if(err) return res.status(500).json({error: "Erro create user"});
+            const newId = this.lastID;
+            db.run("INSERT INTO userSettings (userId) VALUES (?)", [newId]);
+            res.status(201).json({success: true, userId: newId});
+        });
     });
-  }
-  if (email && !/\S+@\S+\.\S+/.test(email)) {
-    return res.status(400).json({ error: "Formato de email inválido." });
-  }
-
-  const sqlInsertUser =
-    "INSERT INTO users (name, login, email, role, is_first_login) VALUES (?, ?, ?, ?, 1)";
-  db.run(sqlInsertUser, [name, login, email || null, role], function (err) {
-    if (err) {
-      if (err.message.includes("UNIQUE constraint failed")) {
-        if (err.message.includes("users.login")) {
-          return res.status(409).json({ error: "Login já cadastrado." });
-        }
-        if (err.message.includes("users.email")) {
-          return res.status(409).json({ error: "Email já cadastrado." });
-        }
-      }
-      console.error("Erro DB (post /admin/users):", err);
-      return res.status(500).json({ error: "Erro ao criar usuário." });
-    }
-    const newUserId = this.lastID;
-    // Cria settings padrão para o novo usuário
-    const sqlInsertSettings =
-      "INSERT OR IGNORE INTO userSettings (userId) VALUES (?)";
-    db.run(sqlInsertSettings, [newUserId], (errSettings) => {
-      if (errSettings) {
-        console.error(
-          `Erro ao criar settings para novo usuário ${newUserId}:`,
-          errSettings
-        );
-      }
-    });
-
-    console.log(
-      `Admin ${req.user.login} criou usuário ${login} (ID: ${newUserId})`
-    );
-    res
-      .status(201)
-      .json({ success: true, userId: newUserId, name, login, email, role });
-  });
 });
 
-// --- Rota Catch-all para SPA (usando Regex) ---
 app.get(/^(?!\/api).*/, (req, res) => {
   res.sendFile(path.join(__dirname, "../frontend", "index.html"));
 });
 
-// --- Handler 404 Final ---
-app.use((req, res, next) => {
-  console.log(`Handler 404 final para: ${req.originalUrl}`);
-  res.status(404).json({ error: "Recurso não encontrado." });
-});
+// --- LÓGICA DE CÁLCULO V3.1 (Atualizada para Flag is_holiday) ---
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(
-    `Backend rodando em http://localhost:${PORT} e acessível na rede local`
-  );
+function calculateDailyTotals(events, settings, dateStr, overrideRow, monthConfig, recordData = {}) {
+    const { is_gig, gig_hourly_rate, justification } = recordData;
+    
+    // 1. Falta
+    if (justification === 'Falta') {
+        const salario = settings.salary_monthly || 0;
+        const deduction = salario / 30;
+        return {
+            effective_worked_minutes: 0,
+            farm_jornada_value: 0,
+            farm_he_value: 0,
+            farm_estourado_value: 0,
+            farm_gig_value: 0,
+            deduction_value: parseFloat(deduction.toFixed(2)),
+            extra_minutes: 0,
+            estourado_minutes: 0,
+            status_desc: "Falta Injustificada"
+        };
+    }
+    
+    if (justification) {
+        return {
+            effective_worked_minutes: 0,
+            farm_jornada_value: 0,
+            farm_he_value: 0,
+            farm_estourado_value: 0,
+            farm_gig_value: 0,
+            deduction_value: 0,
+            extra_minutes: 0,
+            status_desc: justification
+        };
+    }
+
+    // 2. Cálculo de Tempos
+    const timeToMin = (t) => {
+        const [h, m] = t.split(":").map(Number);
+        return h * 60 + m;
+    };
+    
+    let workedMinutes = 0;
+    let almocoMinutes = 0;
+    let pauseMinutes = 0;
+    let entryTime = null;
+
+    const findEvent = (t) => events.find((e) => e.type === t);
+    const entrada = findEvent("entrada");
+    const saida = findEvent("saida");
+    const aOut = findEvent("almoco_saida");
+    const aIn = findEvent("almoco_retorno");
+    
+    const pOuts = events.filter((e) => e.type === "pausa_start").sort((a,b)=>a.time.localeCompare(b.time));
+    const pIns = events.filter((e) => e.type === "pausa_end").sort((a,b)=>a.time.localeCompare(b.time));
+
+    while (pOuts.length > 0 && pIns.length > 0) {
+        let start = pOuts.shift();
+        let endIdx = pIns.findIndex(e => e.time > start.time);
+        if (endIdx !== -1) {
+            let end = pIns.splice(endIdx, 1)[0];
+            pauseMinutes += timeToMin(end.time) - timeToMin(start.time);
+        }
+    }
+
+    if (entrada) {
+        entryTime = timeToMin(entrada.time);
+        let endTime = saida ? timeToMin(saida.time) : null;
+        if (aOut && aIn) almocoMinutes = timeToMin(aIn.time) - timeToMin(aOut.time);
+        
+        if (endTime) {
+            let totalSpan = endTime - entryTime;
+            let discounts = 0;
+            if (almocoMinutes > 0 && !settings.is_almoco_pago) discounts += almocoMinutes;
+            discounts += pauseMinutes;
+            workedMinutes = Math.max(0, totalSpan - discounts);
+        } else {
+             if (aOut) workedMinutes += Math.max(0, timeToMin(aOut.time) - entryTime);
+        }
+    }
+
+    // 3. Cálculo Financeiro
+    let valorMinutoBase = 0;
+    if (monthConfig && monthConfig.base_hourly_rate > 0) {
+        valorMinutoBase = monthConfig.base_hourly_rate / 60;
+    } else {
+        valorMinutoBase = (settings.salary_monthly || 0) / (220 * 60);
+    }
+
+    // A) DIÁRIA (GIG)
+    if (is_gig) {
+        const gigRateMin = gig_hourly_rate / 60;
+        const gigTotal = workedMinutes * gigRateMin;
+        return {
+            effective_worked_minutes: workedMinutes,
+            farm_jornada_value: 0,
+            farm_he_value: 0,
+            farm_estourado_value: 0,
+            farm_gig_value: parseFloat(gigTotal.toFixed(2)),
+            deduction_value: 0,
+            extra_minutes: 0,
+            estourado_minutes: 0,
+            is_gig: true,
+            saida_sugerida_minutes: 0,
+            almoco_minutes_total: almocoMinutes,
+            pause_minutes_total: pauseMinutes
+        };
+    }
+
+    // B) DIA NORMAL
+    const jornadaDiaria = settings.jornada_diaria_minutes || 440;
+    const limiteHE = settings.max_he_minutes || 120;
+    const multHE = settings.multiplicador_hora_extra || 1.5;
+    
+    let dailyMult = 1.0;
+    let heMult = multHE;
+    let isDayWithMultiplier = false;
+
+    // (NOVO V3.1) Checa Override FLAG is_holiday
+    if (overrideRow && overrideRow.is_holiday === 1) {
+        const multFeriado = settings.holiday_multiplier || settings.multiplicador_feriado_domingo || 2.0;
+        isDayWithMultiplier = true;
+        dailyMult = multFeriado;
+        heMult = multFeriado;
+    } else {
+        // Checa Domingo
+        const dt = new Date(dateStr + "T12:00:00Z");
+        if (dt.getUTCDay() === 0) { 
+            if (settings.sunday_rule === "EXTRA") {
+                const sundayMult = settings.sunday_multiplier || 2.0;
+                isDayWithMultiplier = true;
+                dailyMult = sundayMult;
+                heMult = sundayMult;
+            }
+        }
+    }
+
+    let saldo = workedMinutes - jornadaDiaria;
+    let extraMinutes = 0;
+    let estouradoMinutes = 0;
+    let deficitMinutes = 0;
+
+    if (saldo > 0) {
+        extraMinutes = Math.min(saldo, limiteHE);
+        estouradoMinutes = Math.max(0, saldo - limiteHE);
+    } else {
+        deficitMinutes = Math.abs(saldo);
+    }
+
+    const minutosJornadaRealizados = Math.min(workedMinutes, jornadaDiaria);
+    
+    let farmJornada = minutosJornadaRealizados * valorMinutoBase * dailyMult;
+    let farmHE = 0;
+    let farmEstourado = 0;
+
+    if (!isDayWithMultiplier) {
+        farmHE = extraMinutes * valorMinutoBase * multHE;
+        farmEstourado = estouradoMinutes * valorMinutoBase * multHE;
+    } else {
+        farmHE = extraMinutes * valorMinutoBase * dailyMult;
+        farmEstourado = estouradoMinutes * valorMinutoBase * dailyMult;
+    }
+
+    let saidaSugerida = 0;
+    if (entryTime !== null) {
+        let almocoPadrao = settings.tempo_almoco_minutes || 60;
+        if (almocoMinutes > 0) almocoPadrao = almocoMinutes;
+        saidaSugerida = entryTime + jornadaDiaria;
+        if (!settings.is_almoco_pago) saidaSugerida += almocoPadrao;
+    }
+
+    return {
+        effective_worked_minutes: workedMinutes,
+        almoco_minutes_total: almocoMinutes,
+        pause_minutes_total: pauseMinutes,
+        saida_sugerida_minutes: saidaSugerida,
+        
+        extra_minutes: extraMinutes,
+        estourado_minutes: estouradoMinutes,
+        deficit_minutes: deficitMinutes,
+
+        farm_jornada_value: parseFloat(farmJornada.toFixed(2)),
+        farm_he_value: parseFloat(farmHE.toFixed(2)),
+        farm_estourado_value: parseFloat(farmEstourado.toFixed(2)),
+        farm_gig_value: 0,
+        deduction_value: 0,
+        
+        is_day_with_multiplier: isDayWithMultiplier,
+        valor_por_minuto: valorMinutoBase,
+        valor_por_minuto_extra: valorMinutoBase * heMult
+    };
+}
+
+// Lógica Auditor
+function calculatePendingDates(settings, overrides, records, startStr, endStr) {
+    const pending = [];
+    let current = new Date(startStr);
+    const end = new Date(endStr);
+    
+    const recordMap = {};
+    records.forEach(r => recordMap[r.date] = true);
+    
+    const overrideMap = {};
+    overrides.forEach(o => overrideMap[o.date] = o);
+    
+    let weeklyPattern = [1,1,1,1,1,0,0];
+    if (settings.scale_work_days) {
+        try { weeklyPattern = JSON.parse(settings.scale_work_days); } catch(e){}
+    }
+    const getPatternIdx = (jsDay) => jsDay === 0 ? 6 : jsDay - 1;
+
+    while(current < end) {
+        const dStr = current.toISOString().split("T")[0];
+        
+        if (!recordMap[dStr]) {
+            let shouldWork = false;
+            
+            // 1. Checa Override
+            if (overrideMap[dStr]) {
+                // (UPDATE V3.1) A lógica agora olha para day_type explicitamente
+                if (overrideMap[dStr].day_type === 'WORK') shouldWork = true;
+                // Se for OFF ou GIG, não cobra no auditor (GIG é opcional)
+            } else {
+                // 2. Checa Escala Padrão
+                const dayOfWeek = current.getDay();
+                const pIdx = getPatternIdx(dayOfWeek);
+                if (weeklyPattern[pIdx] === 1) shouldWork = true;
+            }
+
+            if (shouldWork) {
+                pending.push(dStr);
+            }
+        }
+        current.setDate(current.getDate() + 1);
+    }
+    return pending;
+}
+
+app.listen(PORT, () => {
+  console.log(`\n--- SmartClockin V3.1 Server ---`);
+  console.log(`Port: ${PORT}`);
+  console.log(`Local: http://localhost:${PORT}`);
 });

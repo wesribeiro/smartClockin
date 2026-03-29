@@ -1,224 +1,82 @@
-# SmartClockin - Sistema de Controle de Ponto Inteligente
+# Ponto Inteligente - Documentação do Projeto (V3.0)
 
-Sistema completo de registro de ponto eletrônico com cálculos automáticos de horas extras, adicionais noturnos, feriados e integração com legislação trabalhista brasileira (CLT).
+## Diário de Bordo: 28 de Dezembro de 2025 (V3.0 - Gestão de Jornada e Diárias)
 
-## Funcionalidades
+### 1. O Conceito (V3.0)
 
-### 1. Registro de Ponto
+A Versão 3.0 transforma o SmartClockin de um registrador de ponto em um **Gestor de Jornada Completo**. 
+O foco agora é a precisão financeira absoluta ("Centavo por Centavo") e a gestão de exceções.
 
-O aplicativo permite registrar os seguintes eventos de ponto:
-- **Entrada**: Hora de início da jornada de trabalho
-- **Saída do Almoço**: Quando o funcionário sai para o intervalo
-- **Retorno do Almoço**: Quando o funcionário retorna do intervalo
-- **Pausa**: Intervalos de pausa durante a jornada
-- **Saída**: Término da jornada de trabalho
+O sistema entende que a vida real tem imprevistos: você esquece de bater o ponto, troca o dia da folga ou faz um "bico" (diária) no seu dia de descanso. O aplicativo agora audita esses eventos e garante que o cálculo final bata com a realidade do pagamento.
 
-Cada registro pode ser feito:
-- No momento atual (botão "Agora")
-- Manual (digitando o horário desejado)
+### 2. Novas Regras de Negócio (V3.0)
 
-### 2. Dashboard - Painel Principal
+#### 2.1. O Auditor de Jornada
+Ao abrir o aplicativo, o sistema verifica o passado. Se houver dias marcados como "Trabalho" no planejamento que não possuem registros de ponto, o sistema cobra uma justificativa:
+* **Esqueci:** Permite lançar os horários manualmente.
+* **Falta:** O sistema calcula o valor do dia e **subtrai** do salário mensal.
+* **Folga/Compensação:** O dia é ignorado no financeiro.
+* **Feriado:** Considera como descanso remunerado.
 
-O painel principal exibe em tempo real:
+#### 2.2. Lógica de "Diária por Hora" (Trabalho na Folga)
+Se você trabalhar em um dia que estava planejado como **FOLGA**:
+* O sistema **não** usa o Salário Base nem o divisor de horas extras comum.
+* O cálculo é: `Horas Trabalhadas × Valor da Hora de Folga`.
+* *Exemplo:* Valor configurado R$ 20,00/h. Trabalhou 6 horas no domingo de folga = Recebe R$ 120,00 limpos (somados ao salário).
 
-#### Barra Superior (Farm Bar)
-- **Total de Horas Trabalhadas**: Tempo total trabalhado no dia
-- **Valor Total (R$)**: Valor monetário total do dia incluindo jornada + horas extras
+#### 2.3. Estimativa Líquida
+Foi adicionado um campo para informar a "% de Descontos (INSS/IRRF)". O sistema exibe o total Bruto e uma estimativa do Líquido para facilitar o planejamento financeiro do usuário.
 
-#### Barras de Progresso
-- **Meta da Jornada**: Progresso em relação à carga horária diária
-- **Meta de HE**: Progresso em relação ao limite de horas extras diário
+### 3. Requisitos Técnicos
 
-#### Informações em Tempo Real
-- **Faltam**: Tempo restante para completar a jornada
-- **Hora Extra**: Quantidade de horas extras acumuladas no momento
-- **Tempo Estourado**: Quando ultrapassa o limite de HE permitido
-- **Atraso**: Minutos de atraso na entrada (se aplicável)
+* **Stack:** Node.js (Backend), SQLite (Banco de Dados), Vanilla JavaScript (Frontend), Tailwind CSS.
+* **Cálculo Híbrido:** O backend agora suporta dois modos de cálculo simultâneos no mesmo mês:
+    1.  **Regime CLT Padrão:** Salário Mensal + Extras (para dias de escala).
+    2.  **Regime Horista/Diária:** Valor por Hora (para dias de folga trabalhados).
 
-#### Indicadores Visuais
-- **Feriado/Domingo**: Card com destaque dourado indicando adicionais
-- **Dia Finalizado**: Indicação quando o dia está fechado
+### 4. Estrutura de Dados (Schema V3.0)
 
-### 3. Cálculos Automáticos
+Além das tabelas da V2 (`month_configs`, `day_records`), novos campos são necessários em `userSettings`:
 
-O sistema calcula automaticamente:
+* `valor_hora_folga`: (Real) Valor pago por hora em dias de folga (ex: 20.00).
+* `percentual_descontos`: (Real) Estimativa de descontos em folha (ex: 10.0).
+* `bloquear_pendencias`: (Boolean) Se true, esconde os valores monetários enquanto houver dias não justificados.
 
-#### Valor da Hora Base
-- Divide o salário mensal pelo divisor mensal configurado
-- Considera a jornada diária de trabalho
+### 5. Manual da Aplicação
 
-#### Horas Extras (HE)
-- Calcula minutos trabalhados além da jornada diária
-- Aplica multiplicador configurado (padrão CLT: 50% = 1.5x)
-- Diferencia HE normal de HE Estourada (acima do limite diário)
+#### 5.1. Fluxo Diário (O Auditor)
+1.  Abra o app.
+2.  Se houver dias passados em aberto, um card amarelo aparecerá: "Você tem 2 dias pendentes".
+3.  Clique em "Resolver". O sistema perguntará dia a dia: "Você trabalhou neste dia?".
+4.  Responda honestamente para que o cálculo financeiro seja corrigido (Falta desconta, Trabalho soma).
 
-#### Adicional Noturno
-- Percentual adicional para trabalho noturno (padrão: 20%)
-- Calculado automaticamente entre 22:00 e 05:00
+#### 5.2. Configurações (Ajustes)
+* **Valor Hora (Folga):** Defina quanto você ganha por hora ao trabalhar nas suas folgas (bicos/diárias).
+* **Descontos:** Insira a % média que vem descontada no seu contracheque para ter uma visão realista do saldo.
 
-#### Adicional de Feriado/Domingo
-- Percentual adicional para trabalho em dias feriados (padrão: 100% = 2x)
-- Inclui Sunday e holidays
+#### 5.3. Relatórios
+A nova tela de relatórios exibe o "Espelho de Ponto":
+* Lista de todos os dias do mês.
+* Ícones de status: ✅ (Trabalhado), ➖ (Folga), ❌ (Falta), 💰 (Diária Extra).
+* Resumo Financeiro no rodapé:
+    * (+) Salário Base
+    * (+) Horas Extras (Dias Normais)
+    * (+) Adicional Diárias (Dias de Folga)
+    * (-) Desconto de Faltas
+    * **(=) Total Bruto**
+    * (-) Descontos Impostos
+    * **(=) Total Líquido Estimado**
 
-#### DSR (Descanso Semanal Remunerado)
-- Calcula o valor de DSR baseado nas HE do mês
-- Considera domingos e feriados do mês
+### 6. Plano de Ação (Implementação V3.0)
 
-### 4. Painel Mensal
+1.  **Backend:** Atualizar `database.js` com novos campos de settings. Atualizar `server.js` para processar justificativas de falta e cálculo de diária.
+2.  **Frontend (Settings):** Adicionar inputs para "Valor Hora Folga" e "% Descontos".
+3.  **Frontend (Auditor):** Criar o componente visual que detecta pendências e o Modal de Justificativa.
+4.  **Frontend (Relatórios):** Implementar a visualização de lista com o resumo financeiro detalhado.
 
-Visão consolidada do mês com:
+---
 
-#### Cards Principais
-- **Valor Atual**: Salário + HE acumuladas até agora + DSR parcial
-- **Valor Projetado**: Projeção do total do mês incluindo HE futuras
-- **Valor Ideal**: Meta máxima possível considerando DSR completo
-- **Perda Financeira**: HE não realizadas × valor da hora extra
-
-#### Indicadores
-- **HE Realizado**: Total de horas extras feitas no mês
-- **HE Esperado**: Meta de HE para o mês
-- **Dias Perfeitos**: Dias com HE completa
-- **Dias com Perda**: Dias com déficit de jornada
-- **Tempo Perdido**: Minutos além do horário de saída padrão
-- **Tempo Compensado**: Minutos compensados / Minutos de atraso
-
-#### Calendário Mensal
-- Visualização por dia com código de cores:
-  - 🟢 **Verde**: Dia perfeito (jornada + HE esperada)
-  - 🟡 **Amarelo**: Dia normal (jornada completa sem HE)
-  - 🔴 **Vermelho**: Dia com perda (déficit de jornada)
-  - 🟦 **Azul**: Folga
-  - 🟠 **Laranja**: Feriado
-  - ⚪ **Cinza**: Dia futuro ou sem registro
-
-### 5. Configurações
-
-#### Jornada e Horários
-- **Jornada Diária**: Horas e minutos da carga horária diária
-- **Intervalo de Almoço**: Tempo de pausa para almoço
-- **Entrada Padrão**: Horário habitual de entrada
-- **Saída do Almoço**: Horário de saída para almoço
-- **Retorno do Almoço**: Horário de retorno do almoço
-- **Saída Padrão**: Horário habitual de saída
-
-#### Dias Trabalhados
-- Seleção dos dias da semana trabalhados
-- Configuração flexível (5 ou 6 dias)
-
-#### Valores e Multiplicadores
-- **Salário Base**: Salário mensal bruto
-- **Divisor Mensal**: Divisor para cálculo da hora (padrão: 220)
-- **Multiplicador HE (%)**: Percentual adicional para horas extras (padrão CLT: 50%)
-- **Multiplicador Feriado/Domingo (%)**: Percentual para trabalho em feriados (padrão CLT: 100%)
-- **Adicional Noturno (%)**: Percentual para trabalho noturno (padrão: 20%)
-- **FGTS (%)**: Percentual de FGTS sobre o salário
-
-#### Regras de Negócio
-- **Limite HE**: Máximo de horas extras permitidas por dia
-- **Pausa 15min**: Habilitar/desabilitar pausa obrigatória
-- **Almoço Pago**: Se o intervalo de almoço conta como trabalhado
-- **Política de Domingos**: Gera folga compensatória ou paga 100%
-- **Política de Pausa**: Por evento ou por dia
-- **Alerta de Voz**: Ativar/desativar notificações sonoras
-
-#### Localização
-- **Fuso Horário**: Configuração de timezone
-
-#### Painel Mensal (Configurações)
-- **Meta de HE por Dia**: Meta de horas extras esperada diariamente
-- **DSR Ativo**: Considerar Descanso Semanal Remunerado nos cálculos
-
-### 6. Relatório Diário
-
-Geração de relatório detalhado do dia com:
-- Lista de todos os eventos de ponto
-- Total de horas trabalhadas
-- Total de horas extras
-- Valores calculados (jornada, HE, adicionais)
-- Exportação para PNG
-
-### 7. Funcionalidades Administrativas
-
-- **Criar Usuários**: Adicionar novos funcionários
-- **Alterar Senha**: Mudar senha de acesso
-- **Visualizar Todos os Usuários**: Lista de usuários cadastrados
-
-## Dados Informados ao Usuário
-
-### Tempo Real
-| Dado | Descrição |
-|------|-----------|
-| Total de Horas | Tempo total trabalhado no dia |
-| Faltam | Tempo restante para jornada completa |
-| Hora Extra | HE acumulada no momento |
-| Tempo Estourado | Minutos acima do limite de HE |
-| Atraso | Minutos de atraso na entrada |
-
-### Valores Monetários
-| Dado | Descrição |
-|------|-----------|
-| Valor Total Dia | Jornada + HE + adicionais do dia |
-| Valor da Hora | Valor por hora trabalhada |
-| Valor HE | Valor da hora extra |
-| Valor Noturno | Valor da hora noturna |
-| Valor Feriado | Valor da hora em feriado |
-| Valor DSR | Descanso Semanal Remunerado |
-
-### Mensal
-| Dado | Descrição |
-|------|-----------|
-| Valor Atual | Total acumulado no mês |
-| Valor Projetado | Projeção do mês completo |
-| Valor Ideal | Meta máxima possível |
-| Perda Financeira | HE não realizadas |
-| HE Realizado | Total de HE no mês |
-| Dias Perfeitos | Dias com meta atingida |
-
-## Configurações Padrão (CLT)
-
-O sistema oferece modo "Padrão CLT" que aplica automaticamente:
-- Jornada de 8h48min diárias (440 minutos)
-- 1 hora de almoço
-- Multiplicador de HE: 50% (1.5x)
-- Multiplicador Feriado/Domingo: 100% (2x)
-- Adicional Noturno: 20%
-- Divisor Mensal: 220
-- DSR ativo
-- Trabalho de Segunda a Sábado
-
-## Tecnologias
-
-- **Frontend**: HTML, CSS (Tailwind), JavaScript (Vanilla)
-- **Backend**: Node.js, Express
-- **Banco de Dados**: SQLite
-- **Autenticação**: JWT (JSON Web Tokens)
-
-## Instalação
-
-```bash
-# Instalar dependências
-cd backend
-npm install
-
-# Iniciar servidor
-npm start
-```
-
-A aplicação estará disponível em `http://localhost:3001`
-
-## Estrutura de Arquivos
-
-```
-smartClockin/
-├── backend/
-│   ├── server.js         # Servidor principal
-│   ├── database.js       # Conexão SQLite
-│   ├── routes/          # Rotas da API
-│   └── ...
-├── frontend/
-│   ├── index.html       # Interface principal
-│   ├── app.js          # Lógica do frontend
-│   └── ...
-├── package.json
-└── README.md
-```
+### Histórico de Versões
+* **V1.0:** Registro de ponto simples e cálculo diário básico.
+* **V2.0:** Introdução do "Mês Vivo", Planejador Mensal e Escalas (12x36/Semanal).
+* **V3.0 (Atual):** Gestão de Pendências (Faltas/Justificativas), Diária por Hora e Relatório Financeiro Completo.

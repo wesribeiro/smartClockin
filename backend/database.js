@@ -2,35 +2,33 @@ const sqlite3 = require("sqlite3").verbose();
 const bcrypt = require("bcrypt");
 const path = require("path");
 
-// (CORREÇÃO) Garante que o DB seja criado no diretório 'backend'
+// Garante que o DB seja criado no diretório 'backend'
 const DB_SOURCE = path.resolve(__dirname, "ponto.db");
 
-// Tabela de Usuários (RF1)
-// (ATUALIZADO) Adiciona 'login' e torna 'email' opcional
+// Tabela de Usuários
 const createUsersTable = `
 CREATE TABLE IF NOT EXISTS users (
     userId INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT,
-    login TEXT NOT NULL, -- Será UNIQUE via índice
-    email TEXT UNIQUE, -- AGORA OPCIONAL
+    login TEXT NOT NULL, 
+    email TEXT UNIQUE,
     password_hash TEXT,
     role TEXT CHECK(role IN ('user', 'admin')) NOT NULL DEFAULT 'user',
     is_first_login INTEGER DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );`;
 
-// (NOVO) Índice único para a coluna login
+// Índice único para login
 const createLoginIndex = `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login ON users(login);
 `;
 
-// Tabela de Configurações (RF2.1)
-// (ATUALIZADO) Adicionado campo 'max_he_minutes'
+// Tabela de Configurações
 const createUserSettingsTable = `
 CREATE TABLE IF NOT EXISTS userSettings (
     userId INTEGER PRIMARY KEY,
     salary_monthly REAL DEFAULT 0,
-    jornada_diaria_minutes INTEGER DEFAULT 440, /* 7h20m */
+    jornada_diaria_minutes INTEGER DEFAULT 440,
     entrada_padrao TEXT DEFAULT '07:00',
     saida_almoco_padrao TEXT DEFAULT '12:00',
     retorno_almoco_padrao TEXT DEFAULT '13:00',
@@ -48,40 +46,63 @@ CREATE TABLE IF NOT EXISTS userSettings (
     adicional_noturno_percent REAL DEFAULT 20.0,
     disable_sunday_auto_multiplier INTEGER DEFAULT 0,
     is_almoco_pago INTEGER DEFAULT 0,
-    
-    /* NOVO CAMPO (Implementação V29) */
     max_he_minutes INTEGER DEFAULT 120,
-
-    /* NOVOS CAMPOS (Tela Mês) */
-    dsr_ativo INTEGER DEFAULT 1,
-    horas_extras_padrao_dia INTEGER DEFAULT 120, /* em minutos, padrão 2h */
-
-    /* NOVOS CAMPOS (Modelo RH) */
-    divisor_mensal INTEGER DEFAULT 220,          /* divisor de horas mensais configurável */
-    dias_trabalho TEXT DEFAULT NULL,              /* JSON: ["seg","ter",...] substitui dias_trabalho_por_semana */
-    domingo_policy TEXT DEFAULT 'folga_compensatoria' /* 'folga_compensatoria' ou '100%' */
-
+    
+    /* Configurações de Escala V3.1 */
+    scale_type TEXT DEFAULT 'WEEKLY', /* WEEKLY, 12X36 */
+    scale_work_days TEXT DEFAULT '[1,1,1,1,1,1,0]', /* Seg-Sab */
+    scale_12x36_anchor_date TEXT,
+    sunday_rule TEXT DEFAULT 'EXTRA', /* EXTRA, NORMAL */
+    sunday_multiplier REAL DEFAULT 2.0,
+    holiday_multiplier REAL DEFAULT 2.0
 );`;
 
-// Tabela de Registros de Ponto (RF3)
+// Tabela de Configuração Mensal
+const createMonthConfigsTable = `
+CREATE TABLE IF NOT EXISTS month_configs (
+    configId INTEGER PRIMARY KEY AUTOINCREMENT,
+    userId INTEGER NOT NULL,
+    month_key TEXT NOT NULL,
+    planned_work_days INTEGER DEFAULT 0,
+    base_hourly_rate REAL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(userId, month_key)
+);`;
+
+// Tabela de Overrides do Planner (Atualizada V3.1)
+// Adicionado campo is_holiday para separar a natureza do dia da ação (trabalhar/folgar)
+const createPlannerOverridesTable = `
+CREATE TABLE IF NOT EXISTS planner_overrides (
+    overrideId INTEGER PRIMARY KEY AUTOINCREMENT,
+    userId INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    day_type TEXT CHECK(day_type IN ('WORK', 'OFF', 'HOLIDAY', 'GIG')) NOT NULL, /* Mantendo HOLIDAY no check por legado, mas usaremos WORK/OFF + flag */
+    is_holiday INTEGER DEFAULT 0, /* 0 ou 1 */
+    notes TEXT,
+    gig_hourly_rate REAL DEFAULT 0, /* Salvar taxa específica para o dia */
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(userId, date)
+);`;
+
+// Tabela de Registros de Ponto
 const createPointRecordsTable = `
 CREATE TABLE IF NOT EXISTS pointRecords (
     recordId INTEGER PRIMARY KEY AUTOINCREMENT,
     userId INTEGER NOT NULL,
-    date TEXT NOT NULL, /* Formato YYYY-MM-DD */
-    events TEXT DEFAULT '[]', /* JSON Array [{type, time, is_manual}] */
-    aggregates TEXT DEFAULT '{}', /* JSON Object com cálculos */
-    is_holiday INTEGER DEFAULT 0, /* 0 ou 1 */
-    is_folga INTEGER DEFAULT 0, /* 0 ou 1 */
-    is_domingo_trabalhado INTEGER DEFAULT 0, /* 0 ou 1 */
-    is_finalized INTEGER DEFAULT 0, /* 0 ou 1 */
+    date TEXT NOT NULL,
+    events TEXT DEFAULT '[]',
+    aggregates TEXT DEFAULT '{}',
+    is_holiday INTEGER DEFAULT 0, /* Legacy: Mantido, mas Planner tem prioridade */
+    is_finalized INTEGER DEFAULT 0,
+    justification TEXT,
+    is_gig INTEGER DEFAULT 0,
+    gig_hourly_rate REAL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (userId) REFERENCES users (userId) ON DELETE CASCADE,
     UNIQUE(userId, date)
 );`;
 
-// Trigger para atualizar 'updated_at'
 const createPointRecordsUpdateTrigger = `
 CREATE TRIGGER IF NOT EXISTS update_pointRecords_updated_at
 AFTER UPDATE ON pointRecords FOR EACH ROW
@@ -96,153 +117,84 @@ const db = new sqlite3.Database(DB_SOURCE, (err) => {
   } else {
     console.log("Conectado ao banco de dados SQLite em", DB_SOURCE);
     db.serialize(() => {
-      // --- Migração (Adiciona colunas novas se não existirem) ---
+      // Função Auxiliar de Migração
       const addColumn = (tableName, columnName, columnDefinition, callback) => {
         db.run(
           `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`,
           (alterErr) => {
-            if (
-              alterErr &&
-              alterErr.message.includes("duplicate column name")
-            ) {
-              // Coluna já existe, ignora o erro
+            if (alterErr && alterErr.message.includes("duplicate column name")) {
+              // Ignora se já existe
             } else if (alterErr) {
-              console.error(
-                `Erro ao adicionar coluna '${columnName}' em '${tableName}':`,
-                alterErr
-              );
+              console.error(`Erro ao adicionar coluna '${columnName}' em '${tableName}':`, alterErr);
             } else {
-              console.log(
-                `Coluna '${columnName}' adicionada com sucesso em '${tableName}'.`
-              );
+              console.log(`Coluna '${columnName}' adicionada com sucesso em '${tableName}'.`);
             }
             if (callback) callback(alterErr);
           }
         );
       };
 
-      // Cria tabela Users (se não existir)
+      // 1. Users
       db.run(createUsersTable, (err) => {
-        if (err) console.error("Erro Tabela Users:", err);
-        else {
-          // (CORRIGIDO) Adiciona a coluna 'login' primeiro, SEM 'UNIQUE'
-          addColumn("users", "login", "TEXT", () => {
-            // Após garantir que a coluna existe, roda o seed
-            const saltRounds = 10;
-            const defaultPassword = "@1254";
-            bcrypt.hash(defaultPassword, saltRounds, (errHash, hash) => {
-              if (errHash) {
-                console.error("Erro fatal ao gerar hash:", errHash);
-                return;
-              }
-
-              // Popula o login dos usuários padrão (Admin e User)
-              // Usamos UPDATE para contas existentes e INSERT OR IGNORE para novas
-              db.run(
-                `UPDATE users SET login = ? WHERE userId = ? AND login IS NULL`,
-                ["admin", 1]
-              );
-              db.run(
-                `UPDATE users SET login = ? WHERE userId = ? AND login IS NULL`,
-                ["user", 2]
-              );
-
-              db.run(
-                `INSERT OR IGNORE INTO users (userId, name, login, email, password_hash, role, is_first_login) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [
-                  1,
-                  "Admin Padrão",
-                  "admin",
-                  "admin@example.com",
-                  hash,
-                  "admin",
-                  0,
-                ],
-                (errInsertAdmin) => {
-                  if (errInsertAdmin)
-                    console.error("Erro ao inserir admin:", errInsertAdmin);
-                }
-              );
-              db.run(
-                `INSERT OR IGNORE INTO users (userId, name, login, email, password_hash, role, is_first_login) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [
-                  2,
-                  "Usuário Padrão",
-                  "user",
-                  "user@example.com",
-                  hash,
-                  "user",
-                  0,
-                ],
-                (errInsertUser) => {
-                  if (errInsertUser)
-                    console.error("Erro ao inserir user:", errInsertUser);
-                }
-              );
-
-              // (CORRIGIDO) Finalmente, cria o índice único
-              db.run(createLoginIndex, (errIndex) => {
-                if (errIndex)
-                  console.error("Erro ao criar índice 'login':", errIndex);
-              });
-            });
-          });
+        if (!err) {
+             const saltRounds = 10;
+             const defaultPassword = "@1254";
+             bcrypt.hash(defaultPassword, saltRounds, (errHash, hash) => {
+               if(!errHash) {
+                 db.run(`UPDATE users SET login = ? WHERE userId = ? AND login IS NULL`, ["admin", 1]);
+                 db.run(`UPDATE users SET login = ? WHERE userId = ? AND login IS NULL`, ["user", 2]);
+                 db.run(`INSERT OR IGNORE INTO users (userId, name, login, email, password_hash, role, is_first_login) VALUES (?, ?, ?, ?, ?, ?, ?)`, [1, "Admin Padrão", "admin", "admin@example.com", hash, "admin", 0]);
+                 db.run(`INSERT OR IGNORE INTO users (userId, name, login, email, password_hash, role, is_first_login) VALUES (?, ?, ?, ?, ?, ?, ?)`, [2, "Usuário Padrão", "user", "user@example.com", hash, "user", 0]);
+                 db.run(createLoginIndex);
+               }
+             });
         }
       });
 
-      // Tabela de Configurações
+      // 2. Settings
       db.run(createUserSettingsTable, (err) => {
-        if (err) {
-          console.error("Erro Tabela Settings (CREATE):", err);
-          return;
+        if (!err) {
+          db.run("INSERT OR IGNORE INTO userSettings (userId) VALUES (?), (?)", [1, 2]);
+          // Migrações V2
+          addColumn("userSettings", "adicional_noturno_percent", "REAL DEFAULT 20.0");
+          addColumn("userSettings", "disable_sunday_auto_multiplier", "INTEGER DEFAULT 0");
+          addColumn("userSettings", "is_almoco_pago", "INTEGER DEFAULT 0");
+          addColumn("userSettings", "max_he_minutes", "INTEGER DEFAULT 120");
+          // Migrações V3.1
+          addColumn("userSettings", "scale_type", "TEXT DEFAULT 'WEEKLY'");
+          addColumn("userSettings", "scale_work_days", "TEXT DEFAULT '[1,1,1,1,1,1,0]'");
+          addColumn("userSettings", "scale_12x36_anchor_date", "TEXT");
+          addColumn("userSettings", "sunday_rule", "TEXT DEFAULT 'EXTRA'");
+          addColumn("userSettings", "sunday_multiplier", "REAL DEFAULT 2.0");
+          addColumn("userSettings", "holiday_multiplier", "REAL DEFAULT 2.0");
         }
+      });
 
-        // Garante que os usuários de seed tenham configurações
-        db.run(
-          "INSERT OR IGNORE INTO userSettings (userId) VALUES (?), (?)",
-          [1, 2],
-          (errSeedSettings) => {
-            if (errSeedSettings)
-              console.error("Erro ao garantir settings:", errSeedSettings);
+      // 3. Month Configs
+      db.run(createMonthConfigsTable);
+
+      // 4. Planner Overrides (V3.1)
+      db.run(createPlannerOverridesTable, (err) => {
+          if(!err) {
+              // Adicionar colunas novas caso a tabela já exista da versão V3.0
+              addColumn("planner_overrides", "is_holiday", "INTEGER DEFAULT 0");
+              addColumn("planner_overrides", "gig_hourly_rate", "REAL DEFAULT 0");
           }
-        );
+      });
 
-        // --- Migrações de Colunas de Settings ---
-        addColumn(
-          "userSettings",
-          "adicional_noturno_percent",
-          "REAL DEFAULT 20.0"
-        );
-        addColumn(
-          "userSettings",
-          "disable_sunday_auto_multiplier",
-          "INTEGER DEFAULT 0"
-        );
-        addColumn("userSettings", "is_almoco_pago", "INTEGER DEFAULT 0");
-        addColumn("userSettings", "max_he_minutes", "INTEGER DEFAULT 120");
-        // Novos campos - Tela Mês
-        addColumn("userSettings", "dsr_ativo", "INTEGER DEFAULT 1");
-        addColumn("userSettings", "horas_extras_padrao_dia", "INTEGER DEFAULT 120");
-        // Novos campos - Modelo RH
-        addColumn("userSettings", "divisor_mensal", "INTEGER DEFAULT 220");
-        addColumn("userSettings", "dias_trabalho", "TEXT DEFAULT NULL");
-        addColumn("userSettings", "domingo_policy", "TEXT DEFAULT 'folga_compensatoria'");
-      }); // Fim do createUserSettingsTable run
-
+      // 5. Point Records
       db.run(createPointRecordsTable, (err) => {
-        if (err) console.error("Erro Tabela Records:", err);
-        else {
-          addColumn("pointRecords", "is_folga", "INTEGER DEFAULT 0");
-          addColumn("pointRecords", "is_domingo_trabalhado", "INTEGER DEFAULT 0");
+        if (!err) {
+            addColumn("pointRecords", "justification", "TEXT");
+            addColumn("pointRecords", "is_gig", "INTEGER DEFAULT 0");
+            addColumn("pointRecords", "gig_hourly_rate", "REAL DEFAULT 0");
         }
       });
 
-      db.run(createPointRecordsUpdateTrigger, (err) => {
-        if (err) console.error("Erro Trigger Records:", err);
-      });
-    }); // Fim do db.serialize
+      // 6. Triggers
+      db.run(createPointRecordsUpdateTrigger);
+    });
   }
 });
 
 module.exports = db;
-//<!-- Safe version 13/11 - 14h -->
